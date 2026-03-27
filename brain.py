@@ -30,6 +30,7 @@ class Neuron:
         self.decay         = 0.95     # voltage decay per step
         self.refractory    = 0        # recovery time after spike
         self.last_spike    = -np.inf  # kab last fire kiya
+        self.fatigue       = 0.0      # thakan factor (adaptation)
         self.spike_history = deque(maxlen=100)
     
     def receive(self, current: float, t: float) -> bool:
@@ -41,6 +42,9 @@ class Neuron:
             self.refractory -= 1
             return False  # abhi recover ho raha hai
         
+        # Fatigue decay (Dheere dheere thakan khatam hoti hai)
+        self.fatigue *= 0.97 # Balanced decay
+
         # Voltage update (leaky integrate)
         # Bias add kiya jaise Nengo mein hota hai
         self.voltage = (
@@ -49,10 +53,16 @@ class Neuron:
             + self.rest * (1 - self.decay)
         )
         
+        # Threshold check with Fatigue (Thakan se fire karna mushkil ho jata hai)
+        # Nengo logic: neurons fire when current > threshold
+        # Fatigue affects threshold heavily
+        effective_threshold = self.threshold + (self.fatigue * 2.0)
+
         # Threshold cross hua?
-        if self.voltage >= self.threshold:
+        if self.voltage >= effective_threshold:
             self.voltage    = self.rest   # reset
-            self.refractory = 3           # 3 steps rest
+            self.refractory = 2           # thoda kam rest
+            self.fatigue   += 1.0         # Fatigue badha di (Zabardast thakan)
             self.last_spike = t
             self.spike_history.append(t)
             return True  # SPIKE!
@@ -99,7 +109,7 @@ class RealtimeBrain:
         self.consolidated   = {}  # longterm memory
         
         # Lateral Inhibition (Muqabala)
-        self.inhibition_strength = 0.05  # Balanced competition
+        self.inhibition_strength = 1.5  # Zabardast Competition!
 
         # Stats
         self.total_spikes   = 0
@@ -362,7 +372,7 @@ if __name__ == "__main__":
                 my_brain.reward(1.0)
                 if (episode + 1) % 20 == 0: print(f"Pattern A -> Neuron {action}: Sahi! (Dopamine)")
             else:
-                my_brain.punish(1.0) # Penalty badha di (Galti sudharo)
+                my_brain.punish(2.0) # Penalty badha di (Saza!)
                 if (episode + 1) % 20 == 0: print(f"Pattern A -> Neuron {action}: Galat!")
         elif (episode + 1) % 20 == 0:
             print("Pattern A: No Spikes")
@@ -382,7 +392,7 @@ if __name__ == "__main__":
                 my_brain.reward(1.0)
                 if (episode + 1) % 20 == 0: print(f"Pattern B -> Neuron {action}: Sahi! (Dopamine)")
             else:
-                my_brain.punish(1.0) # Penalty badha di (Galti sudharo)
+                my_brain.punish(2.0) # Penalty badha di (Saza!)
                 if (episode + 1) % 20 == 0: print(f"Pattern B -> Neuron {action}: Galat!")
         elif (episode + 1) % 20 == 0:
             print("Pattern B: No Spikes")
