@@ -1,6 +1,7 @@
 import numpy as np
 from collections import deque
 import time
+import sys
 
 class Synapse:
     """
@@ -329,7 +330,7 @@ class RealtimeBrain:
         if consolidated_count > 0:
             print(f"Consolidated {consolidated_count} connections")
         return consolidated_count
-    
+
     def normalize_weights(self, target_avg: float = 1.0):
         """
         Weight Normalization — weights ko stable rakho
@@ -343,6 +344,49 @@ class RealtimeBrain:
         factor = target_avg / current_avg
         for syn in self.synapses.values():
             syn.weight = np.clip(syn.weight * factor, 0.01, 2.0)
+
+    # ── Inference Mode ───────────────────────────────────────────────
+
+    def run_inference(self, pattern_A, pattern_B, episodes=100):
+        """
+        Inference Mode — bina lalach (dopamine) ke test karo
+        """
+        print("\n--- Starting AI Brain Inference (Test Mode) ---")
+        self.frozen = True  # lock weights
+        self.dopamine = 0.0 # reset dopamine
+
+        correct_A = 0
+        correct_B = 0
+
+        for episode in range(episodes):
+            # Test Pattern A
+            out_A = np.zeros(len(self.layers[-1]))
+            for _ in range(100):
+                out_A += self.step(pattern_A * 20.0)
+
+            if out_A.sum() > 0 and np.argmax(out_A) == 0:
+                correct_A += 1
+
+            # Rest
+            for _ in range(10): self.step(np.zeros(4))
+
+            # Test Pattern B
+            out_B = np.zeros(len(self.layers[-1]))
+            for _ in range(100):
+                out_B += self.step(pattern_B * 20.0)
+
+            if out_B.sum() > 0 and np.argmax(out_B) == 1:
+                correct_B += 1
+
+            if (episode + 1) % 20 == 0:
+                print(f"Episode {episode+1}/{episodes} | Accuracy A: {correct_A/(episode+1):.2%} | B: {correct_B/(episode+1):.2%}")
+
+        print("\n--- Inference Results ---")
+        print(f"Final Accuracy - Pattern A: {correct_A/episodes:.2%}, Pattern B: {correct_B/episodes:.2%}")
+        if (correct_A + correct_B) / (2 * episodes) > 0.8:
+            print("Dimaag ne bina lalach ke zabardast perform kiya! Phase 1 Successful. ✅")
+        else:
+            print("Dimaag thoda confuse hai, shayad aur training ki zaroorat hai. ⚠️")
 
     # ── Stats ────────────────────────────────────────────────────────
     
@@ -373,74 +417,77 @@ if __name__ == "__main__":
 
 
 
-    print("\n--- Starting AI Brain Training ---")
-    
-    consecutive_success = 0
+    if "--test" in sys.argv:
+        my_brain.run_inference(pattern_A, pattern_B)
+    else:
+        print("\n--- Starting AI Brain Training ---")
 
-    for episode in range(500):
-        if (episode + 1) % 50 == 0:
-            print(f"\nEpisode {episode + 1}")
+        consecutive_success = 0
 
-        success_A = False
-        success_B = False
+        for episode in range(500):
+            if (episode + 1) % 50 == 0:
+                print(f"\nEpisode {episode + 1}")
 
-        # 1. Pattern A dikhao
-        out_A = np.zeros(len(my_brain.layers[-1]))
-        for _ in range(100):
-            step_out = my_brain.step(pattern_A * 20.0)
-            out_A += step_out
+            success_A = False
+            success_B = False
 
-        if out_A.sum() > 0:
-            action = np.argmax(out_A)
-            if action == 0:
-                my_brain.reward(2.0)
-                success_A = True
-                if (episode + 1) % 50 == 0: print(f"Pattern A -> Neuron {action}: Sahi! (Dopamine)")
+            # 1. Pattern A dikhao
+            out_A = np.zeros(len(my_brain.layers[-1]))
+            for _ in range(100):
+                step_out = my_brain.step(pattern_A * 20.0)
+                out_A += step_out
+
+            if out_A.sum() > 0:
+                action = np.argmax(out_A)
+                if action == 0:
+                    my_brain.reward(2.0)
+                    success_A = True
+                    if (episode + 1) % 50 == 0: print(f"Pattern A -> Neuron {action}: Sahi! (Dopamine)")
+                else:
+                    my_brain.punish(2.0)
+                    if (episode + 1) % 50 == 0: print(f"Pattern A -> Neuron {action}: Galat!")
+            elif (episode + 1) % 50 == 0:
+                print("Pattern A: No Spikes")
+
+            # Small rest period
+            for _ in range(10): my_brain.step(np.zeros(4))
+
+            # 2. Pattern B dikhao
+            out_B = np.zeros(len(my_brain.layers[-1]))
+            for _ in range(100):
+                step_out = my_brain.step(pattern_B * 20.0)
+                out_B += step_out
+
+            if out_B.sum() > 0:
+                action = np.argmax(out_B)
+                if action == 1:
+                    my_brain.reward(5.0) # Bonus for Neuron 1
+                    success_B = True
+                    if (episode + 1) % 50 == 0: print(f"Pattern B -> Neuron {action}: Sahi! (Bonus Dopamine)")
+                else:
+                    my_brain.punish(2.0)
+                    if (episode + 1) % 50 == 0: print(f"Pattern B -> Neuron {action}: Galat!")
+            elif (episode + 1) % 50 == 0:
+                print("Pattern B: No Spikes")
+
+            # Success Lock checking
+            if success_A and success_B:
+                consecutive_success += 1
+            elif (not success_A and not success_B): # Skip episodes with 'No Spikes'
+                 pass
             else:
-                my_brain.punish(2.0)
-                if (episode + 1) % 50 == 0: print(f"Pattern A -> Neuron {action}: Galat!")
-        elif (episode + 1) % 50 == 0:
-            print("Pattern A: No Spikes")
+                consecutive_success = 0
 
-        # Small rest period
-        for _ in range(10): my_brain.step(np.zeros(4))
+            if consecutive_success >= 10 and not my_brain.frozen:
+                my_brain.frozen = True
+                print(f"!!! Success Lock at Episode {episode+1}: Permanent Memory locked! !!!")
 
-        # 2. Pattern B dikhao
-        out_B = np.zeros(len(my_brain.layers[-1]))
-        for _ in range(100):
-            step_out = my_brain.step(pattern_B * 20.0)
-            out_B += step_out
+            # Weight Normalization & Memory Decay
+            if not my_brain.frozen:
+                for syn in my_brain.synapses.values():
+                    syn.weight *= 0.9999 # Very slow decay to hold onto Sahi! connections
+                my_brain.normalize_weights(target_avg=1.0)
 
-        if out_B.sum() > 0:
-            action = np.argmax(out_B)
-            if action == 1:
-                my_brain.reward(5.0) # Bonus for Neuron 1
-                success_B = True
-                if (episode + 1) % 50 == 0: print(f"Pattern B -> Neuron {action}: Sahi! (Bonus Dopamine)")
-            else:
-                my_brain.punish(2.0)
-                if (episode + 1) % 50 == 0: print(f"Pattern B -> Neuron {action}: Galat!")
-        elif (episode + 1) % 50 == 0:
-            print("Pattern B: No Spikes")
-
-        # Success Lock checking
-        if success_A and success_B:
-            consecutive_success += 1
-        elif (not success_A and not success_B): # Skip episodes with 'No Spikes'
-             pass
-        else:
-            consecutive_success = 0
-
-        if consecutive_success >= 10 and not my_brain.frozen:
-            my_brain.frozen = True
-            print(f"!!! Success Lock at Episode {episode+1}: Permanent Memory locked! !!!")
-
-        # Weight Normalization & Memory Decay
-        if not my_brain.frozen:
-            for syn in my_brain.synapses.values():
-                syn.weight *= 0.9999 # Very slow decay to hold onto Sahi! connections
-            my_brain.normalize_weights(target_avg=1.0)
-
-        if (episode + 1) % 50 == 0:
-            print(f"Stats: {my_brain.status()} | Streak: {consecutive_success}")
+            if (episode + 1) % 50 == 0:
+                print(f"Stats: {my_brain.status()} | Streak: {consecutive_success}")
 
