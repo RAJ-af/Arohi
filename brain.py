@@ -9,7 +9,7 @@ class Synapse:
     """
     def __init__(self):
         # Initial weights boosted for better punch!
-        self.weight   = np.random.uniform(1.0, 2.0)
+        self.weight   = np.random.uniform(0.5, 1.0)
         self.last_pre  = -np.inf   # kab pre neuron ne fire kiya
         self.last_post = -np.inf   # kab post neuron ne fire kiya
         
@@ -54,9 +54,8 @@ class Neuron:
             + self.rest * (1 - self.decay)
         )
         
-        # Effective threshold (Muqabala + Fatigue)
-        # Moderate fatigue impact
-        effective_threshold = self.threshold + (self.fatigue * 5.0)
+        # Effective threshold
+        effective_threshold = self.threshold + (self.fatigue * 2.0)
 
         # Threshold cross hua?
         if self.voltage >= effective_threshold:
@@ -110,7 +109,10 @@ class RealtimeBrain:
         
         # Lateral Inhibition (Muqabala)
         # Reduced slightly to allow neurons to stay alive while competing
-        self.inhibition_strength = 1.5
+        self.inhibition_strength = 0.5
+
+        # Success Lock
+        self.frozen = False
 
         # Stats
         self.total_spikes   = 0
@@ -155,10 +157,11 @@ class RealtimeBrain:
                         if syn:
                             total_input      += syn.weight
                             syn.last_pre      = self.t
-                            # Eligibility trace update
-                            syn.eligibility   = (
-                                syn.eligibility * 0.9 + 0.1
-                            )
+                            if not self.frozen:
+                                # Eligibility trace update
+                                syn.eligibility   = (
+                                    syn.eligibility * 0.9 + 0.1
+                                )
                 
                 fired = post.receive(total_input, self.t)
                 layer_spikes.append(fired)
@@ -172,7 +175,8 @@ class RealtimeBrain:
             spikes_per_layer.append(layer_spikes)
         
         # STDP learning apply karo
-        self._stdp_update(spikes_per_layer)
+        if not self.frozen:
+            self._stdp_update(spikes_per_layer)
         
         # Dopamine decay
         self.dopamine *= self.dopamine_decay
@@ -194,7 +198,9 @@ class RealtimeBrain:
         Hebbian learning (Integrated from stdplearn.py)
         Jo neurons saath fire hote hain, woh wire ho jaate hain!
         """
-        A_plus  = 0.1     # Lowered to let rewards lead the way
+        if self.frozen: return # Success Lock: Permanent Memory!
+
+        A_plus  = 0.05    # Slower learning for stronger memory
         A_minus = 0.2     # Strong Pruning
         tau     = 0.02    # Standard window
         
@@ -237,6 +243,8 @@ class RealtimeBrain:
         "Yeh accha tha" — weights strengthen karo
         Jaise brain mein dopamine release hota hai
         """
+        if self.frozen: return # permanent memory locked!
+
         self.dopamine = min(self.dopamine + amount, 10.0)
         
         # Eligibility traces pe dopamine apply karo
@@ -254,6 +262,8 @@ class RealtimeBrain:
         "Yeh galat tha" — jo hua woh weaken karo
         Negative dopamine (adrenaline jaise)
         """
+        if self.frozen: return # permanent memory locked!
+
         self.dopamine = max(self.dopamine - amount, -20.0)
         
         for syn in self.synapses.values():
@@ -272,6 +282,8 @@ class RealtimeBrain:
         Neuron 0 bahut fire karega → threshold upar (Tired)
         Neuron 1 fire nahi karega → threshold neeche (Eager)
         """
+        if self.frozen: return # Success Lock: Permanent Memory!
+
         target_rate = 0.05  # Lower target for sparse coding
         
         for layer in self.layers:
@@ -283,9 +295,9 @@ class RealtimeBrain:
                 actual_rate = len(recent) / 0.5
 
                 if actual_rate > target_rate:
-                    neuron.threshold += 0.05  # Thaka do (Higher threshold)
+                    neuron.threshold += 0.01  # Slow scaling
                 elif actual_rate < target_rate * 0.1:
-                    neuron.threshold -= 0.02  # Jaga do (Lower threshold)
+                    neuron.threshold -= 0.005 # Slow scaling
 
                 # Dynamic range for extreme sensitivity
                 neuron.threshold = np.clip(neuron.threshold, 0.01, 1.0)
@@ -363,15 +375,14 @@ if __name__ == "__main__":
 
     print("\n--- Starting AI Brain Training ---")
     
-    # Brain ko thoda active banane ke liye initial inputs
-    # Alternate patterns for better stabilization
-    for _ in range(100):
-        my_brain.step(pattern_A * 100.0)
-        my_brain.step(pattern_B * 100.0)
+    consecutive_success = 0
 
     for episode in range(500):
         if (episode + 1) % 50 == 0:
             print(f"\nEpisode {episode + 1}")
+
+        success_A = False
+        success_B = False
 
         # 1. Pattern A dikhao
         out_A = np.zeros(len(my_brain.layers[-1]))
@@ -382,10 +393,11 @@ if __name__ == "__main__":
         if out_A.sum() > 0:
             action = np.argmax(out_A)
             if action == 0:
-                my_brain.reward(2.0) # Reward badha diya!
+                my_brain.reward(2.0)
+                success_A = True
                 if (episode + 1) % 50 == 0: print(f"Pattern A -> Neuron {action}: Sahi! (Dopamine)")
             else:
-                my_brain.punish(2.0) # Penalty high hai (Saza!)
+                my_brain.punish(2.0)
                 if (episode + 1) % 50 == 0: print(f"Pattern A -> Neuron {action}: Galat!")
         elif (episode + 1) % 50 == 0:
             print("Pattern A: No Spikes")
@@ -402,20 +414,33 @@ if __name__ == "__main__":
         if out_B.sum() > 0:
             action = np.argmax(out_B)
             if action == 1:
-                my_brain.reward(5.0) # Dopamine Bonus for Neuron 1!
+                my_brain.reward(5.0) # Bonus for Neuron 1
+                success_B = True
                 if (episode + 1) % 50 == 0: print(f"Pattern B -> Neuron {action}: Sahi! (Bonus Dopamine)")
             else:
-                my_brain.punish(2.0) # Penalty high hai (Saza!)
+                my_brain.punish(2.0)
                 if (episode + 1) % 50 == 0: print(f"Pattern B -> Neuron {action}: Galat!")
         elif (episode + 1) % 50 == 0:
             print("Pattern B: No Spikes")
 
+        # Success Lock checking
+        if success_A and success_B:
+            consecutive_success += 1
+        elif (not success_A and not success_B): # Skip episodes with 'No Spikes'
+             pass
+        else:
+            consecutive_success = 0
+
+        if consecutive_success >= 10 and not my_brain.frozen:
+            my_brain.frozen = True
+            print(f"!!! Success Lock at Episode {episode+1}: Permanent Memory locked! !!!")
+
         # Weight Normalization & Memory Decay
-        # Purane connections ko dheere-dheere delete/kamzor karo
-        for syn in my_brain.synapses.values():
-            syn.weight *= 0.999 # Slower decay
-        my_brain.normalize_weights(target_avg=1.0)
+        if not my_brain.frozen:
+            for syn in my_brain.synapses.values():
+                syn.weight *= 0.9999 # Very slow decay to hold onto Sahi! connections
+            my_brain.normalize_weights(target_avg=1.0)
 
         if (episode + 1) % 50 == 0:
-            print(f"Stats: {my_brain.status()}")
+            print(f"Stats: {my_brain.status()} | Streak: {consecutive_success}")
 
