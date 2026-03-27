@@ -109,7 +109,8 @@ class RealtimeBrain:
         self.consolidated   = {}  # longterm memory
         
         # Lateral Inhibition (Muqabala)
-        self.inhibition_strength = 5.0 # Strong competition to shut down rivals
+        # Reduced slightly to allow neurons to stay alive while competing
+        self.inhibition_strength = 1.5
 
         # Stats
         self.total_spikes   = 0
@@ -193,8 +194,8 @@ class RealtimeBrain:
         Hebbian learning (Integrated from stdplearn.py)
         Jo neurons saath fire hote hain, woh wire ho jaate hain!
         """
-        A_plus  = 1.0     # Rapid learning
-        A_minus = 0.02    # Pruning
+        A_plus  = 0.1     # Lowered to let rewards lead the way
+        A_minus = 0.2     # Strong Pruning
         tau     = 0.02    # Standard window
         
         for li in range(len(self.layers) - 1):
@@ -409,7 +410,10 @@ if __name__ == "__main__":
         elif (episode + 1) % 50 == 0:
             print("Pattern B: No Spikes")
 
-        # Weight Normalization step
+        # Weight Normalization & Memory Decay
+        # Purane connections ko dheere-dheere delete/kamzor karo
+        for syn in my_brain.synapses.values():
+            syn.weight *= 0.999 # Slower decay
         my_brain.normalize_weights(target_avg=1.0)
 
         if (episode + 1) % 50 == 0:
