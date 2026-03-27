@@ -8,7 +8,8 @@ class Synapse:
     Weight change hoti hai experience se
     """
     def __init__(self):
-        self.weight   = np.random.randn() * 0.1
+        # Initial weights boosted for better punch!
+        self.weight   = np.random.uniform(1.0, 2.0)
         self.last_pre  = -np.inf   # kab pre neuron ne fire kiya
         self.last_post = -np.inf   # kab post neuron ne fire kiya
         
@@ -24,7 +25,7 @@ class Neuron:
     def __init__(self, neuron_id):
         self.id            = neuron_id
         self.voltage       = 0.0      # membrane potential
-        self.threshold     = 0.5      # fire kab karo (thoda lower for easier firing)
+        self.threshold     = 0.05     # Extreme Sensitivity
         self.bias          = 0.01     # Nengo style bias — dimaag thoda active rahe
         self.rest          = -0.1     # resting voltage
         self.decay         = 0.95     # voltage decay per step
@@ -43,7 +44,7 @@ class Neuron:
             return False  # abhi recover ho raha hai
         
         # Fatigue decay (Dheere dheere thakan khatam hoti hai)
-        self.fatigue *= 0.97 # Balanced decay
+        self.fatigue *= 0.999
 
         # Voltage update (leaky integrate)
         # Bias add kiya jaise Nengo mein hota hai
@@ -53,16 +54,14 @@ class Neuron:
             + self.rest * (1 - self.decay)
         )
         
-        # Threshold check with Fatigue (Thakan se fire karna mushkil ho jata hai)
-        # Nengo logic: neurons fire when current > threshold
-        # Fatigue affects threshold heavily
-        effective_threshold = self.threshold + (self.fatigue * 2.0)
+        # Effective threshold
+        effective_threshold = self.threshold + self.fatigue
 
         # Threshold cross hua?
         if self.voltage >= effective_threshold:
             self.voltage    = self.rest   # reset
-            self.refractory = 2           # thoda kam rest
-            self.fatigue   += 1.0         # Fatigue badha di (Zabardast thakan)
+            self.refractory = 2           # rest
+            self.fatigue   += 2.0         # Forced alternation
             self.last_spike = t
             self.spike_history.append(t)
             return True  # SPIKE!
@@ -109,7 +108,7 @@ class RealtimeBrain:
         self.consolidated   = {}  # longterm memory
         
         # Lateral Inhibition (Muqabala)
-        self.inhibition_strength = 1.5  # Zabardast Competition!
+        self.inhibition_strength = 2.0
 
         # Stats
         self.total_spikes   = 0
@@ -192,8 +191,8 @@ class RealtimeBrain:
         Hebbian learning (Integrated from stdplearn.py)
         Jo neurons saath fire hote hain, woh wire ho jaate hain!
         """
-        A_plus  = 0.01    # strengthen (from stdplearn)
-        A_minus = 0.005   # weaken (from stdplearn)
+        A_plus  = 2.0     # Rapid Human-like Learning
+        A_minus = 0.05    # Balanced weakening
         tau     = 0.02    # time window
         
         for li in range(len(self.layers) - 1):
@@ -225,7 +224,8 @@ class RealtimeBrain:
                     if dw != 0:
                         # Dopamine modulate karta hai learning
                         dw *= (1 + self.dopamine * 2)
-                        syn.weight = np.clip(syn.weight + dw, -2.0, 2.0)
+                        # Weights positive rehne chahiye (Excitatory neurons)
+                        syn.weight = np.clip(syn.weight + dw, 0.01, 2.0)
     
     # ── Dopamine: Reward Signal ──────────────────────────────────────
     
@@ -234,15 +234,15 @@ class RealtimeBrain:
         "Yeh accha tha" — weights strengthen karo
         Jaise brain mein dopamine release hota hai
         """
-        self.dopamine = min(self.dopamine + amount, 5.0)
+        self.dopamine = min(self.dopamine + amount, 10.0)
         
         # Eligibility traces pe dopamine apply karo
         # (jo recently active tha woh strengthen hoga)
         for syn in self.synapses.values():
             if syn.eligibility > 0.1:
                 syn.weight = np.clip(
-                    syn.weight + 0.01 * syn.eligibility * amount,
-                    -2.0, 2.0
+                    syn.weight + 0.2 * syn.eligibility * amount,
+                    0.01, 2.0
                 )
                 syn.eligibility *= 0.5  # use ho gaya
     
@@ -251,13 +251,13 @@ class RealtimeBrain:
         "Yeh galat tha" — jo hua woh weaken karo
         Negative dopamine (adrenaline jaise)
         """
-        self.dopamine = max(self.dopamine - amount, -2.0)
+        self.dopamine = max(self.dopamine - amount, -20.0)
         
         for syn in self.synapses.values():
             if syn.eligibility > 0.1:
                 syn.weight = np.clip(
-                    syn.weight - 0.01 * syn.eligibility * amount,
-                    -2.0, 2.0
+                    syn.weight - 0.2 * syn.eligibility * amount,
+                    0.01, 2.0
                 )
                 syn.eligibility *= 0.5
     
@@ -352,18 +352,18 @@ if __name__ == "__main__":
     
     # Brain ko thoda active banane ke liye initial inputs
     # Alternate patterns for better stabilization
-    for _ in range(250):
-        my_brain.step(pattern_A)
-        my_brain.step(pattern_B)
+    for _ in range(100):
+        my_brain.step(pattern_A * 100.0)
+        my_brain.step(pattern_B * 100.0)
 
     for episode in range(200):
         if (episode + 1) % 20 == 0:
             print(f"\nEpisode {episode + 1}")
 
         # 1. Pattern A dikhao
-        out_A = np.zeros(my_brain.layers[-1].__len__())
-        for _ in range(50):
-            step_out = my_brain.step(pattern_A)
+        out_A = np.zeros(len(my_brain.layers[-1]))
+        for _ in range(100):
+            step_out = my_brain.step(pattern_A * 20.0) # Scaling adjusted
             out_A += step_out
 
         if out_A.sum() > 0:
@@ -381,9 +381,9 @@ if __name__ == "__main__":
         for _ in range(20): my_brain.step(np.zeros(4))
 
         # 2. Pattern B dikhao
-        out_B = np.zeros(my_brain.layers[-1].__len__())
-        for _ in range(50):
-            step_out = my_brain.step(pattern_B)
+        out_B = np.zeros(len(my_brain.layers[-1]))
+        for _ in range(100):
+            step_out = my_brain.step(pattern_B * 20.0) # Scaling adjusted
             out_B += step_out
 
         if out_B.sum() > 0:
