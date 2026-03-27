@@ -1,0 +1,30 @@
+import nengo
+import numpy as np
+
+with nengo.Network() as brain:
+    
+    # Input signal (jaise aankhon se light)
+    stimulus = nengo.Node(
+        lambda t: np.sin(2 * np.pi * t)
+    )
+    
+    # Spiking neurons — float math nahi
+    # Real brain jaise ON/OFF spikes
+    neurons = nengo.Ensemble(
+        n_neurons=100,        # 100 neurons
+        dimensions=1,
+        neuron_type=nengo.SpikingRectifiedLinear()
+    )
+    
+    # Connection
+    nengo.Connection(stimulus, neurons)
+    
+    # Record karo
+    probe = nengo.Probe(neurons.neurons)
+
+# Simulate — CPU pe
+with nengo.Simulator(brain) as sim:
+    sim.run(1.0)  # 1 second
+
+print("Spikes:", sim.data[probe])
+# Yeh dekho — numbers nahi, spikes hain!
