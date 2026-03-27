@@ -98,6 +98,9 @@ class RealtimeBrain:
         self.experience_log: list[dict] = []
         self.consolidated   = {}  # longterm memory
         
+        # Lateral Inhibition (Muqabala)
+        self.inhibition_strength = 0.05  # Balanced competition
+
         # Stats
         self.total_spikes   = 0
         self.learning_steps = 0
@@ -116,9 +119,9 @@ class RealtimeBrain:
         current_spikes   = []
         
         for i, neuron in enumerate(self.layers[0]):
-            # Input scaling: 2.0 multiplier for stronger stimulus
+            # Input scaling: 3.0 multiplier for stronger stimulus
             fired = neuron.receive(
-                (inputs[i] * 2.0) if i < len(inputs) else 0.0,
+                (inputs[i] * 3.0) if i < len(inputs) else 0.0,
                 self.t
             )
             current_spikes.append(fired)
@@ -129,7 +132,10 @@ class RealtimeBrain:
             prev_spikes  = spikes_per_layer[li - 1]
             layer_spikes = []
             
-            for post in self.layers[li]:
+            # current layer neurons
+            current_layer = self.layers[li]
+
+            for post in current_layer:
                 total_input = 0.0
                 
                 for pi, pre in enumerate(self.layers[li - 1]):
@@ -147,6 +153,10 @@ class RealtimeBrain:
                 layer_spikes.append(fired)
                 if fired:
                     self.total_spikes += 1
+                    # Lateral Inhibition: Peer neurons (same layer) ko dabbao
+                    for peer in current_layer:
+                        if peer.id != post.id:
+                            peer.voltage -= self.inhibition_strength
             
             spikes_per_layer.append(layer_spikes)
         
@@ -331,8 +341,10 @@ if __name__ == "__main__":
     print("\n--- Starting AI Brain Training ---")
     
     # Brain ko thoda active banane ke liye initial inputs
-    for _ in range(500):
-        my_brain.step(pattern_A + pattern_B)
+    # Alternate patterns for better stabilization
+    for _ in range(250):
+        my_brain.step(pattern_A)
+        my_brain.step(pattern_B)
 
     for episode in range(200):
         if (episode + 1) % 20 == 0:
@@ -350,10 +362,13 @@ if __name__ == "__main__":
                 my_brain.reward(1.0)
                 if (episode + 1) % 20 == 0: print(f"Pattern A -> Neuron {action}: Sahi! (Dopamine)")
             else:
-                my_brain.punish(0.5)
+                my_brain.punish(1.0) # Penalty badha di (Galti sudharo)
                 if (episode + 1) % 20 == 0: print(f"Pattern A -> Neuron {action}: Galat!")
         elif (episode + 1) % 20 == 0:
             print("Pattern A: No Spikes")
+
+        # Small rest period between patterns (reset voltage)
+        for _ in range(20): my_brain.step(np.zeros(4))
 
         # 2. Pattern B dikhao
         out_B = np.zeros(my_brain.layers[-1].__len__())
@@ -367,7 +382,7 @@ if __name__ == "__main__":
                 my_brain.reward(1.0)
                 if (episode + 1) % 20 == 0: print(f"Pattern B -> Neuron {action}: Sahi! (Dopamine)")
             else:
-                my_brain.punish(0.5)
+                my_brain.punish(1.0) # Penalty badha di (Galti sudharo)
                 if (episode + 1) % 20 == 0: print(f"Pattern B -> Neuron {action}: Galat!")
         elif (episode + 1) % 20 == 0:
             print("Pattern B: No Spikes")
