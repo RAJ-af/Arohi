@@ -25,6 +25,7 @@ class Neuron:
         self.id            = neuron_id
         self.voltage       = 0.0      # membrane potential
         self.threshold     = 0.5      # fire kab karo (thoda lower for easier firing)
+        self.bias          = 0.01     # Nengo style bias — dimaag thoda active rahe
         self.rest          = -0.1     # resting voltage
         self.decay         = 0.95     # voltage decay per step
         self.refractory    = 0        # recovery time after spike
@@ -41,9 +42,10 @@ class Neuron:
             return False  # abhi recover ho raha hai
         
         # Voltage update (leaky integrate)
+        # Bias add kiya jaise Nengo mein hota hai
         self.voltage = (
             self.voltage * self.decay 
-            + current 
+            + (current + self.bias)
             + self.rest * (1 - self.decay)
         )
         
@@ -167,12 +169,11 @@ class RealtimeBrain:
     
     def _stdp_update(self, spikes_per_layer):
         """
-        Hebbian learning — biological aur local
-        Koi backpropagation nahi
-        Koi GPU nahi
+        Hebbian learning (Integrated from stdplearn.py)
+        Jo neurons saath fire hote hain, woh wire ho jaate hain!
         """
-        A_plus  = 0.005   # strengthen karo
-        A_minus = 0.003   # weaken karo
+        A_plus  = 0.01    # strengthen (from stdplearn)
+        A_minus = 0.005   # weaken (from stdplearn)
         tau     = 0.02    # time window
         
         for li in range(len(self.layers) - 1):
@@ -187,23 +188,24 @@ class RealtimeBrain:
                         self.layers[li + 1].index(post)
                     ]
                     
+                    dw = 0.0
+
+                    # 1. Post fired: check pre history (Strengthen)
+                    if post_fired and pre.last_spike > -np.inf:
+                        dt = self.t - pre.last_spike
+                        if 0 <= dt < 0.1:
+                            dw += A_plus * np.exp(-dt / tau)
+
+                    # 2. Pre fired: check post history (Weaken)
                     if pre_fired and post.last_spike > -np.inf:
-                        # Pre ne fire kiya — post ka history dekho
                         dt = self.t - post.last_spike
-                        if abs(dt) < 0.1:  # 100ms window
-                            if dt > 0:
-                                # Post pehle fire kiya — weaken
-                                dw = -A_minus * np.exp(-abs(dt)/tau)
-                            else:
-                                # Pre pehle fire kiya — strengthen
-                                dw = A_plus * np.exp(-abs(dt)/tau)
-                            
-                            # Dopamine modulate karta hai learning
-                            dw *= (1 + self.dopamine * 2)
-                            
-                            syn.weight = np.clip(
-                                syn.weight + dw, -2.0, 2.0
-                            )
+                        if 0 < dt < 0.1: # dt > 0 strictly to avoid double-counting same-step
+                            dw -= A_minus * np.exp(-dt / tau)
+
+                    if dw != 0:
+                        # Dopamine modulate karta hai learning
+                        dw *= (1 + self.dopamine * 2)
+                        syn.weight = np.clip(syn.weight + dw, -2.0, 2.0)
     
     # ── Dopamine: Reward Signal ──────────────────────────────────────
     
