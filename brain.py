@@ -109,7 +109,7 @@ class RealtimeBrain:
         self.consolidated   = {}  # longterm memory
         
         # Lateral Inhibition (Muqabala)
-        self.inhibition_strength = 2.0 # Competition
+        self.inhibition_strength = 5.0 # Strong competition to shut down rivals
 
         # Stats
         self.total_spikes   = 0
@@ -177,7 +177,8 @@ class RealtimeBrain:
         self.dopamine *= self.dopamine_decay
         
         # Homeostasis (neurons ko balance rakhna)
-        if self.learning_steps % 1000 == 0:
+        # Frequent checks for faster scaling
+        if self.learning_steps % 100 == 0:
             self._homeostasis()
         
         self.learning_steps += 1
@@ -266,31 +267,27 @@ class RealtimeBrain:
     
     def _homeostasis(self):
         """
-        Neurons khud ko regulate karte hain
-        Bahut zyada fire → threshold badhao
-        Bahut kam fire → threshold ghataao
-        
-        Brain mein yeh hamesha hota rehta hai
+        Homeostatic Scaling — competitive balance
+        Neuron 0 bahut fire karega → threshold upar (Tired)
+        Neuron 1 fire nahi karega → threshold neeche (Eager)
         """
-        target_rate = 0.1  # 10% neurons active ideal
+        target_rate = 0.05  # Lower target for sparse coding
         
         for layer in self.layers:
             for neuron in layer:
-                if len(neuron.spike_history) > 10:
-                    recent = [
-                        s for s in neuron.spike_history 
-                        if self.t - s < 1.0
-                    ]
-                    actual_rate = len(recent) / 1.0
-                    
-                    if actual_rate > target_rate * 2:
-                        neuron.threshold += 0.01  # kam fire karo
-                    elif actual_rate < target_rate * 0.5:
-                        neuron.threshold -= 0.005  # zyada fire karo
-                    
-                    neuron.threshold = np.clip(
-                        neuron.threshold, 0.3, 3.0
-                    )
+                recent = [
+                    s for s in neuron.spike_history
+                    if self.t - s < 0.5
+                ]
+                actual_rate = len(recent) / 0.5
+
+                if actual_rate > target_rate:
+                    neuron.threshold += 0.05  # Thaka do (Higher threshold)
+                elif actual_rate < target_rate * 0.1:
+                    neuron.threshold -= 0.02  # Jaga do (Lower threshold)
+
+                # Dynamic range for extreme sensitivity
+                neuron.threshold = np.clip(neuron.threshold, 0.01, 1.0)
     
     # ── Consolidation: Long-term Memory ─────────────────────────────
     
@@ -404,8 +401,8 @@ if __name__ == "__main__":
         if out_B.sum() > 0:
             action = np.argmax(out_B)
             if action == 1:
-                my_brain.reward(2.0) # Reward badha diya!
-                if (episode + 1) % 50 == 0: print(f"Pattern B -> Neuron {action}: Sahi! (Dopamine)")
+                my_brain.reward(5.0) # Dopamine Bonus for Neuron 1!
+                if (episode + 1) % 50 == 0: print(f"Pattern B -> Neuron {action}: Sahi! (Bonus Dopamine)")
             else:
                 my_brain.punish(2.0) # Penalty high hai (Saza!)
                 if (episode + 1) % 50 == 0: print(f"Pattern B -> Neuron {action}: Galat!")
