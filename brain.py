@@ -233,9 +233,23 @@ class RealtimeBrain:
 
                     if dw != 0:
                         # Dopamine modulate karta hai learning
+                        # Pruning: Pattern mismatch hone par A_minus (unlearning) ko 2x fast kar do
+                        if dw < 0 and self.dopamine < 0:
+                            dw *= 2.0
+
                         dw *= (1 + self.dopamine * 2)
-                        # Weights positive rehne chahiye (Excitatory neurons)
-                        syn.weight = np.clip(syn.weight + dw, 0.01, 2.0)
+
+                        # Weight update with Soft Normalization
+                        old_weight = syn.weight
+                        syn.weight = np.clip(old_weight + dw, 0.01, 1.2) # Hard Cap 1.2
+
+                        # Soft Normalization: Agar weight badha, toh baaki connections proportionally kam karo
+                        if syn.weight > old_weight:
+                            for other_post in self.layers[li + 1]:
+                                if other_post.id != post.id:
+                                    other_syn = self.synapses.get((pre.id, other_post.id))
+                                    if other_syn:
+                                        other_syn.weight = np.clip(other_syn.weight - 0.01, 0.01, 1.2)
     
     # ── Dopamine: Reward Signal ──────────────────────────────────────
     
@@ -254,7 +268,7 @@ class RealtimeBrain:
             if syn.eligibility > 0.1:
                 syn.weight = np.clip(
                     syn.weight + 0.2 * syn.eligibility * amount,
-                    0.01, 2.0
+                    0.01, 1.2 # Hard Cap 1.2
                 )
                 syn.eligibility *= 0.5  # use ho gaya
     
@@ -271,7 +285,7 @@ class RealtimeBrain:
             if syn.eligibility > 0.1:
                 syn.weight = np.clip(
                     syn.weight - 0.2 * syn.eligibility * amount,
-                    0.01, 2.0
+                    0.01, 1.2 # Hard Cap 1.2
                 )
                 syn.eligibility *= 0.5
     
@@ -343,7 +357,31 @@ class RealtimeBrain:
 
         factor = target_avg / current_avg
         for syn in self.synapses.values():
-            syn.weight = np.clip(syn.weight * factor, 0.01, 2.0)
+            syn.weight = np.clip(syn.weight * factor, 0.01, 1.2)
+
+    def apply_manual_controls(self):
+        """
+        'Manual God' Control — control.txt se weights set karo
+        Usage: SET 4->12 0.5
+        """
+        try:
+            with open("control.txt", "r") as f:
+                lines = f.readlines()
+                for line in lines:
+                    parts = line.strip().split()
+                    if len(parts) == 3 and parts[0] == "SET":
+                        ids = parts[1].split("->")
+                        pre, post = int(ids[0]), int(ids[1])
+                        val = float(parts[2])
+                        if (pre, post) in self.synapses:
+                            self.synapses[(pre, post)].weight = np.clip(val, 0.01, 1.2)
+                            print(f"Manual Control: Synapse {pre}->{post} set to {val}")
+            # Clear file after reading to avoid repeated execution
+            open("control.txt", "w").close()
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            print(f"Manual Control Error: {e}")
 
     # ── Inference Mode ───────────────────────────────────────────────
 
@@ -381,9 +419,14 @@ class RealtimeBrain:
             if (episode + 1) % 20 == 0:
                 print(f"Episode {episode+1}/{episodes} | Accuracy A: {correct_A/(episode+1):.2%} | B: {correct_B/(episode+1):.2%}")
 
-        print("\n--- Inference Results ---")
-        print(f"Final Accuracy - Pattern A: {correct_A/episodes:.2%}, Pattern B: {correct_B/episodes:.2%}")
-        if (correct_A + correct_B) / (2 * episodes) > 0.8:
+        print("\n--- Inference Results (Per-Pattern Breakdown) ---")
+        print(f"Pattern A: {correct_A}/{episodes} ({correct_A/episodes:.2%}) {'✅' if correct_A/episodes > 0.9 else '❌'}")
+        print(f"Pattern B: {correct_B}/{episodes} ({correct_B/episodes:.2%}) {'✅' if correct_B/episodes > 0.9 else '❌'}")
+
+        overall_acc = (correct_A + correct_B) / (2 * episodes)
+        print(f"Overall Accuracy: {overall_acc:.2%}")
+
+        if overall_acc > 0.9:
             print("Dimaag ne bina lalach ke zabardast perform kiya! Phase 1 Successful. ✅")
         else:
             print("Dimaag thoda confuse hai, shayad aur training ki zaroorat hai. ⚠️")
@@ -395,13 +438,16 @@ class RealtimeBrain:
         Weight Visualizer — weights ko map mein save karo
         """
         with open("weights_map.txt", "w") as f:
-            f.write(f"Brain Time: {self.t:.2f}s\n")
-            f.write("-" * 30 + "\n")
+            f.write(f"Brain Time: {self.t:.2f}s | Mode: {'Frozen' if self.frozen else 'Training'}\n")
+            f.write("-" * 50 + "\n")
             for (pre, post), syn in sorted(self.synapses.items()):
-                # Visual ASCII bar
-                bar = "#" * int(syn.weight * 10)
-                f.write(f"S[{pre}->{post}]: {syn.weight:.3f} | {bar}\n")
-        print("Weights map saved to weights_map.txt")
+                # Visual ASCII bar (scaled to 1.2 max)
+                filled = int((syn.weight / 1.2) * 20)
+                bar = "[" + "#" * filled + "-" * (20 - filled) + "]"
+                f.write(f"S[{pre:02}->{post:02}]: {syn.weight:.3f} {bar}\n")
+        # Console pe summary dikhao
+        avg = np.mean([s.weight for s in self.synapses.values()])
+        print(f"Weights map updated (Avg: {avg:.3f})")
 
     def reset_fatigue(self):
         """
@@ -446,8 +492,12 @@ if __name__ == "__main__":
         # History for Balanced Success Lock
         history_A = deque(maxlen=20)
         history_B = deque(maxlen=20)
+        acc_A, acc_B = 0.0, 0.0
 
         for episode in range(500):
+            my_brain.total_spikes = 0 # Reset for episodic stats
+            my_brain.apply_manual_controls() # God mode check
+
             if (episode + 1) % 50 == 0:
                 print(f"\nEpisode {episode + 1}")
 
@@ -520,9 +570,9 @@ if __name__ == "__main__":
             acc_A = sum(history_A) / len(history_A) if len(history_A) > 0 else 0
             acc_B = sum(history_B) / len(history_B) if len(history_B) > 0 else 0
 
-            if acc_A > 0.9 and acc_B > 0.9 and len(history_A) == 20 and not my_brain.frozen:
+            if acc_A > 0.95 and acc_B > 0.95 and len(history_A) == 20 and not my_brain.frozen:
                 my_brain.frozen = True
-                print(f"!!! Balanced Success Lock at Episode {episode+1}: Accuracy > 90%! !!!")
+                print(f"!!! Balanced Success Lock at Episode {episode+1}: Accuracy > 95%! !!!")
                 my_brain.show_weights() # Map save karo
 
             # Weight Normalization & Memory Decay
@@ -531,6 +581,10 @@ if __name__ == "__main__":
                     syn.weight *= 0.9999 # Very slow decay to hold onto Sahi! connections
                 my_brain.normalize_weights(target_avg=1.0)
 
-            if (episode + 1) % 50 == 0:
-                print(f"Stats: {my_brain.status()} | Acc_A: {acc_A:.0%} | Acc_B: {acc_B:.0%}")
+            # Auto-update Weight Map
+            if (episode + 1) % 5 == 0:
+                my_brain.show_weights()
+
+                if (episode + 1) % 50 == 0:
+                    print(f"Stats: {my_brain.status()} | Acc_A: {acc_A:.0%} | Acc_B: {acc_B:.0%}")
 
