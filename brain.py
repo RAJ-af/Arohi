@@ -44,7 +44,7 @@ class Neuron:
             return False  # abhi recover ho raha hai
         
         # Fatigue decay (Dheere dheere thakan khatam hoti hai)
-        self.fatigue *= 0.999
+        self.fatigue *= 0.8 # Fast recovery
 
         # Voltage update (leaky integrate)
         # Bias add kiya jaise Nengo mein hota hai
@@ -54,14 +54,15 @@ class Neuron:
             + self.rest * (1 - self.decay)
         )
         
-        # Effective threshold
-        effective_threshold = self.threshold + self.fatigue
+        # Effective threshold (Muqabala + Fatigue)
+        # Moderate fatigue impact
+        effective_threshold = self.threshold + (self.fatigue * 5.0)
 
         # Threshold cross hua?
         if self.voltage >= effective_threshold:
             self.voltage    = self.rest   # reset
             self.refractory = 2           # rest
-            self.fatigue   += 2.0         # Forced alternation
+            self.fatigue   += 1.0         # Balanced Fatigue
             self.last_spike = t
             self.spike_history.append(t)
             return True  # SPIKE!
@@ -108,7 +109,7 @@ class RealtimeBrain:
         self.consolidated   = {}  # longterm memory
         
         # Lateral Inhibition (Muqabala)
-        self.inhibition_strength = 2.0
+        self.inhibition_strength = 2.0 # Competition
 
         # Stats
         self.total_spikes   = 0
@@ -191,9 +192,9 @@ class RealtimeBrain:
         Hebbian learning (Integrated from stdplearn.py)
         Jo neurons saath fire hote hain, woh wire ho jaate hain!
         """
-        A_plus  = 2.0     # Rapid Human-like Learning
-        A_minus = 0.05    # Balanced weakening
-        tau     = 0.02    # time window
+        A_plus  = 1.0     # Rapid learning
+        A_minus = 0.02    # Pruning
+        tau     = 0.02    # Standard window
         
         for li in range(len(self.layers) - 1):
             for pi, pre in enumerate(self.layers[li]):
@@ -319,6 +320,20 @@ class RealtimeBrain:
             print(f"Consolidated {consolidated_count} connections")
         return consolidated_count
     
+    def normalize_weights(self, target_avg: float = 1.0):
+        """
+        Weight Normalization — weights ko stable rakho
+        """
+        weights = [s.weight for s in self.synapses.values()]
+        if not weights: return
+
+        current_avg = np.mean(weights)
+        if current_avg == 0: return
+
+        factor = target_avg / current_avg
+        for syn in self.synapses.values():
+            syn.weight = np.clip(syn.weight * factor, 0.01, 2.0)
+
     # ── Stats ────────────────────────────────────────────────────────
     
     def status(self):
@@ -356,47 +371,50 @@ if __name__ == "__main__":
         my_brain.step(pattern_A * 100.0)
         my_brain.step(pattern_B * 100.0)
 
-    for episode in range(200):
-        if (episode + 1) % 20 == 0:
+    for episode in range(500):
+        if (episode + 1) % 50 == 0:
             print(f"\nEpisode {episode + 1}")
 
         # 1. Pattern A dikhao
         out_A = np.zeros(len(my_brain.layers[-1]))
         for _ in range(100):
-            step_out = my_brain.step(pattern_A * 20.0) # Scaling adjusted
+            step_out = my_brain.step(pattern_A * 20.0)
             out_A += step_out
 
         if out_A.sum() > 0:
             action = np.argmax(out_A)
             if action == 0:
-                my_brain.reward(1.0)
-                if (episode + 1) % 20 == 0: print(f"Pattern A -> Neuron {action}: Sahi! (Dopamine)")
+                my_brain.reward(2.0) # Reward badha diya!
+                if (episode + 1) % 50 == 0: print(f"Pattern A -> Neuron {action}: Sahi! (Dopamine)")
             else:
-                my_brain.punish(2.0) # Penalty badha di (Saza!)
-                if (episode + 1) % 20 == 0: print(f"Pattern A -> Neuron {action}: Galat!")
-        elif (episode + 1) % 20 == 0:
+                my_brain.punish(2.0) # Penalty high hai (Saza!)
+                if (episode + 1) % 50 == 0: print(f"Pattern A -> Neuron {action}: Galat!")
+        elif (episode + 1) % 50 == 0:
             print("Pattern A: No Spikes")
 
-        # Small rest period between patterns (reset voltage)
-        for _ in range(20): my_brain.step(np.zeros(4))
+        # Small rest period
+        for _ in range(10): my_brain.step(np.zeros(4))
 
         # 2. Pattern B dikhao
         out_B = np.zeros(len(my_brain.layers[-1]))
         for _ in range(100):
-            step_out = my_brain.step(pattern_B * 20.0) # Scaling adjusted
+            step_out = my_brain.step(pattern_B * 20.0)
             out_B += step_out
 
         if out_B.sum() > 0:
             action = np.argmax(out_B)
             if action == 1:
-                my_brain.reward(1.0)
-                if (episode + 1) % 20 == 0: print(f"Pattern B -> Neuron {action}: Sahi! (Dopamine)")
+                my_brain.reward(2.0) # Reward badha diya!
+                if (episode + 1) % 50 == 0: print(f"Pattern B -> Neuron {action}: Sahi! (Dopamine)")
             else:
-                my_brain.punish(2.0) # Penalty badha di (Saza!)
-                if (episode + 1) % 20 == 0: print(f"Pattern B -> Neuron {action}: Galat!")
-        elif (episode + 1) % 20 == 0:
+                my_brain.punish(2.0) # Penalty high hai (Saza!)
+                if (episode + 1) % 50 == 0: print(f"Pattern B -> Neuron {action}: Galat!")
+        elif (episode + 1) % 50 == 0:
             print("Pattern B: No Spikes")
 
-        if (episode + 1) % 20 == 0:
+        # Weight Normalization step
+        my_brain.normalize_weights(target_avg=1.0)
+
+        if (episode + 1) % 50 == 0:
             print(f"Stats: {my_brain.status()}")
 
