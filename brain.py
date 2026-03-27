@@ -24,7 +24,7 @@ class Neuron:
     def __init__(self, neuron_id):
         self.id            = neuron_id
         self.voltage       = 0.0      # membrane potential
-        self.threshold     = 1.0      # fire kab karo
+        self.threshold     = 0.5      # fire kab karo (thoda lower for easier firing)
         self.rest          = -0.1     # resting voltage
         self.decay         = 0.95     # voltage decay per step
         self.refractory    = 0        # recovery time after spike
@@ -114,8 +114,9 @@ class RealtimeBrain:
         current_spikes   = []
         
         for i, neuron in enumerate(self.layers[0]):
+            # Input scaling: 2.0 multiplier for stronger stimulus
             fired = neuron.receive(
-                inputs[i] if i < len(inputs) else 0.0, 
+                (inputs[i] * 2.0) if i < len(inputs) else 0.0,
                 self.t
             )
             current_spikes.append(fired)
@@ -292,43 +293,21 @@ class RealtimeBrain:
                 # Consolidated connections decay nahi karte
                 syn.eligibility = 0  # reset trace
         
-        print(f"Consolidated {consolidated_count} connections")
-    for episode in range(10):
-        print(f"\nEpisode {episode + 1}")
-
-        # --- YE WALA HISSA BADLO ---
-        # Pattern A ko 50 baar dikhao (buildup ke liye)
-        for _ in range(50):
-            out_A = my_brain.step(pattern_A)
-        
-        # Ab check karo ki neuron fire hua ya nahi
-        if out_A.sum() > 0:
-            action = np.argmax(out_A)
-            if action == 0:
-                my_brain.reward(1.0)
-                print(f"Pattern A -> Neuron {action}: Sahi! (Dopamine)")
-            else:
-                my_brain.punish(0.5)
-                print(f"Pattern A -> Neuron {action}: Galat!")
-        else:
-            print("Pattern A: No Spikes (Dimaag shant hai)")
-        # ---------------------------
-
-        print(f"Stats: {my_brain.status()}")
+        if consolidated_count > 0:
+            print(f"Consolidated {consolidated_count} connections")
         return consolidated_count
     
     # ── Stats ────────────────────────────────────────────────────────
     
     def status(self):
         weights = [s.weight for s in self.synapses.values()]
-        return {
-            "time":          f"{self.t:.3f}s",
-            "total_spikes":  self.total_spikes,
-            "avg_weight":    f"{np.mean(weights):.4f}",
-            "dopamine":      f"{self.dopamine:.3f}",
-            "longterm_mem":  len(self.consolidated),
-            "synapses":      len(self.synapses),
-        }
+        return (
+            f"T:{self.t:.2f}s | "
+            f"Spikes:{self.total_spikes} | "
+            f"W_avg:{np.mean(weights):.3f} | "
+            f"DA:{self.dopamine:.2f} | "
+            f"Mem:{len(self.consolidated)}"
+        )
 if __name__ == "__main__":
     # 1. Brain setup: 4 inputs -> 8 hidden -> 2 outputs
     my_brain = RealtimeBrain(layer_sizes=[4, 8, 2])
@@ -349,26 +328,48 @@ if __name__ == "__main__":
 
     print("\n--- Starting AI Brain Training ---")
     
-       for episode in range(10):
-        print(f"\nEpisode {episode + 1}")
+    # Brain ko thoda active banane ke liye initial inputs
+    for _ in range(500):
+        my_brain.step(pattern_A + pattern_B)
 
-        # --- YE WALA HISSA BADLO ---
-        # Pattern A ko 50 baar dikhao (buildup ke liye)
+    for episode in range(200):
+        if (episode + 1) % 20 == 0:
+            print(f"\nEpisode {episode + 1}")
+
+        # 1. Pattern A dikhao
+        out_A = np.zeros(my_brain.layers[-1].__len__())
         for _ in range(50):
-            out_A = my_brain.step(pattern_A)
+            step_out = my_brain.step(pattern_A)
+            out_A += step_out
 
-        # Ab check karo ki neuron fire hua ya nahi
         if out_A.sum() > 0:
             action = np.argmax(out_A)
             if action == 0:
                 my_brain.reward(1.0)
-                print(f"Pattern A -> Neuron {action}: Sahi! (Dopamine)")
+                if (episode + 1) % 20 == 0: print(f"Pattern A -> Neuron {action}: Sahi! (Dopamine)")
             else:
                 my_brain.punish(0.5)
-                print(f"Pattern A -> Neuron {action}: Galat!")
-        else:
-            print("Pattern A: No Spikes (Dimaag shant hai)")
-        # ---------------------------
+                if (episode + 1) % 20 == 0: print(f"Pattern A -> Neuron {action}: Galat!")
+        elif (episode + 1) % 20 == 0:
+            print("Pattern A: No Spikes")
 
-        print(f"Stats: {my_brain.status()}")
+        # 2. Pattern B dikhao
+        out_B = np.zeros(my_brain.layers[-1].__len__())
+        for _ in range(50):
+            step_out = my_brain.step(pattern_B)
+            out_B += step_out
+
+        if out_B.sum() > 0:
+            action = np.argmax(out_B)
+            if action == 1:
+                my_brain.reward(1.0)
+                if (episode + 1) % 20 == 0: print(f"Pattern B -> Neuron {action}: Sahi! (Dopamine)")
+            else:
+                my_brain.punish(0.5)
+                if (episode + 1) % 20 == 0: print(f"Pattern B -> Neuron {action}: Galat!")
+        elif (episode + 1) % 20 == 0:
+            print("Pattern B: No Spikes")
+
+        if (episode + 1) % 20 == 0:
+            print(f"Stats: {my_brain.status()}")
 
