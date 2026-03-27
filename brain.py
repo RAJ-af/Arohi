@@ -201,7 +201,7 @@ class RealtimeBrain:
         """
         if self.frozen: return # Success Lock: Permanent Memory!
 
-        A_plus  = 0.05    # Slower learning for stronger memory
+        A_plus  = 0.1     # Balanced
         A_minus = 0.2     # Strong Pruning
         tau     = 0.02    # Standard window
         
@@ -390,6 +390,27 @@ class RealtimeBrain:
 
     # ── Stats ────────────────────────────────────────────────────────
     
+    def show_weights(self):
+        """
+        Weight Visualizer — weights ko map mein save karo
+        """
+        with open("weights_map.txt", "w") as f:
+            f.write(f"Brain Time: {self.t:.2f}s\n")
+            f.write("-" * 30 + "\n")
+            for (pre, post), syn in sorted(self.synapses.items()):
+                # Visual ASCII bar
+                bar = "#" * int(syn.weight * 10)
+                f.write(f"S[{pre}->{post}]: {syn.weight:.3f} | {bar}\n")
+        print("Weights map saved to weights_map.txt")
+
+    def reset_fatigue(self):
+        """
+        Emergency Fatigue Reset
+        """
+        for layer in self.layers:
+            for neuron in layer:
+                neuron.fatigue = 0.0
+
     def status(self):
         weights = [s.weight for s in self.synapses.values()]
         return (
@@ -422,14 +443,36 @@ if __name__ == "__main__":
     else:
         print("\n--- Starting AI Brain Training ---")
 
-        consecutive_success = 0
+        # History for Balanced Success Lock
+        history_A = deque(maxlen=20)
+        history_B = deque(maxlen=20)
 
         for episode in range(500):
             if (episode + 1) % 50 == 0:
                 print(f"\nEpisode {episode + 1}")
 
-            success_A = False
-            success_B = False
+            success_A = 0
+            success_B = 0
+
+            # Targeted Recovery multipliers & Threshold assistance
+            reward_mult_A = 1.0
+            reward_mult_B = 1.0
+            if len(history_A) == 20:
+                if acc_A < 0.3: # Critical recovery
+                    reward_mult_A = 3.0
+                    my_brain.layers[-1][0].threshold = max(0.01, my_brain.layers[-1][0].threshold - 0.02)
+                    my_brain.reset_fatigue()
+                if acc_B < 0.3: # Critical recovery
+                    reward_mult_B = 3.0
+                    my_brain.layers[-1][1].threshold = max(0.01, my_brain.layers[-1][1].threshold - 0.02)
+                    my_brain.reset_fatigue()
+
+            # Inhibition Reset logic
+            if not my_brain.frozen and len(history_A) == 20 and (acc_A < 0.1 or acc_B < 0.1):
+                 current_inhibition = 0.1 # Temporarily reduce to let neurons breathe
+            else:
+                 current_inhibition = 0.5
+            my_brain.inhibition_strength = current_inhibition
 
             # 1. Pattern A dikhao
             out_A = np.zeros(len(my_brain.layers[-1]))
@@ -440,8 +483,8 @@ if __name__ == "__main__":
             if out_A.sum() > 0:
                 action = np.argmax(out_A)
                 if action == 0:
-                    my_brain.reward(2.0)
-                    success_A = True
+                    my_brain.reward(2.0 * reward_mult_A)
+                    success_A = 1
                     if (episode + 1) % 50 == 0: print(f"Pattern A -> Neuron {action}: Sahi! (Dopamine)")
                 else:
                     my_brain.punish(2.0)
@@ -461,8 +504,8 @@ if __name__ == "__main__":
             if out_B.sum() > 0:
                 action = np.argmax(out_B)
                 if action == 1:
-                    my_brain.reward(5.0) # Bonus for Neuron 1
-                    success_B = True
+                    my_brain.reward(5.0 * reward_mult_B) # Bonus + Multiplier
+                    success_B = 1
                     if (episode + 1) % 50 == 0: print(f"Pattern B -> Neuron {action}: Sahi! (Bonus Dopamine)")
                 else:
                     my_brain.punish(2.0)
@@ -470,17 +513,17 @@ if __name__ == "__main__":
             elif (episode + 1) % 50 == 0:
                 print("Pattern B: No Spikes")
 
-            # Success Lock checking
-            if success_A and success_B:
-                consecutive_success += 1
-            elif (not success_A and not success_B): # Skip episodes with 'No Spikes'
-                 pass
-            else:
-                consecutive_success = 0
+            # Balanced Success Lock checking
+            history_A.append(success_A)
+            history_B.append(success_B)
 
-            if consecutive_success >= 10 and not my_brain.frozen:
+            acc_A = sum(history_A) / len(history_A) if len(history_A) > 0 else 0
+            acc_B = sum(history_B) / len(history_B) if len(history_B) > 0 else 0
+
+            if acc_A > 0.9 and acc_B > 0.9 and len(history_A) == 20 and not my_brain.frozen:
                 my_brain.frozen = True
-                print(f"!!! Success Lock at Episode {episode+1}: Permanent Memory locked! !!!")
+                print(f"!!! Balanced Success Lock at Episode {episode+1}: Accuracy > 90%! !!!")
+                my_brain.show_weights() # Map save karo
 
             # Weight Normalization & Memory Decay
             if not my_brain.frozen:
@@ -489,5 +532,5 @@ if __name__ == "__main__":
                 my_brain.normalize_weights(target_avg=1.0)
 
             if (episode + 1) % 50 == 0:
-                print(f"Stats: {my_brain.status()} | Streak: {consecutive_success}")
+                print(f"Stats: {my_brain.status()} | Acc_A: {acc_A:.0%} | Acc_B: {acc_B:.0%}")
 
