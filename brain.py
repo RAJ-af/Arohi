@@ -6,28 +6,27 @@ import sys
 class Synapse:
     """
     Ek connection — memory yahan rehti hai
-    Weight change hoti hai experience se
+    Weight change hoti hai experience se (STDP)
     """
     def __init__(self):
         # Initial weights boosted for better punch!
-        self.weight   = np.random.uniform(0.5, 1.0)
+        self.weight   = np.random.uniform(0.5, 0.8)
         self.last_pre  = -np.inf   # kab pre neuron ne fire kiya
         self.last_post = -np.inf   # kab post neuron ne fire kiya
         
         # Eligibility trace — "kuch hua tha yaad hai"
-        # Dopamine aane tak wait karta hai
         self.eligibility = 0.0
 
 
 class Neuron:
     """
-    Single spiking neuron — bilkul biological
+    Single spiking neuron — biological LIF model
     """
     def __init__(self, neuron_id):
         self.id            = neuron_id
         self.voltage       = 0.0      # membrane potential
         self.threshold     = 0.05     # Extreme Sensitivity
-        self.bias          = 0.01     # Nengo style bias — dimaag thoda active rahe
+        self.bias          = 0.01     # Nengo style bias
         self.rest          = -0.1     # resting voltage
         self.decay         = 0.95     # voltage decay per step
         self.refractory    = 0        # recovery time after spike
@@ -36,19 +35,14 @@ class Neuron:
         self.spike_history = deque(maxlen=100)
     
     def receive(self, current: float, t: float) -> bool:
-        """
-        Input current receive karo
-        Spike karo ya nahi decide karo
-        """
         if self.refractory > 0:
             self.refractory -= 1
-            return False  # abhi recover ho raha hai
+            return False
         
-        # Fatigue decay (Dheere dheere thakan khatam hoti hai)
-        self.fatigue *= 0.8 # Fast recovery
+        # Fatigue decay
+        self.fatigue *= 0.8
 
-        # Voltage update (leaky integrate)
-        # Bias add kiya jaise Nengo mein hota hai
+        # Voltage update
         self.voltage = (
             self.voltage * self.decay 
             + (current + self.bias)
@@ -58,34 +52,31 @@ class Neuron:
         # Effective threshold
         effective_threshold = self.threshold + (self.fatigue * 2.0)
 
-        # Threshold cross hua?
         if self.voltage >= effective_threshold:
             self.voltage    = self.rest   # reset
             self.refractory = 2           # rest
-            self.fatigue   += 1.0         # Balanced Fatigue
+            self.fatigue   += 1.0         # increment fatigue
             self.last_spike = t
             self.spike_history.append(t)
-            return True  # SPIKE!
+            return True
         
         return False
+
+    def reset(self):
+        """Internal state reset karo for stability"""
+        self.voltage = self.rest
+        self.fatigue = 0.0
+        self.refractory = 0
 
 
 class RealtimeBrain:
     """
     Poora system — CPU pe, realtime learning ke saath
-    
-    Mechanisms:
-    1. STDP    — spike timing se weights update
-    2. Dopamine — reward/punishment signal
-    3. Homeostasis — neurons bahut zyada ya kam fire na karein
-    4. Consolidation — important cheezein stable ho jaati hain
     """
-    
     def __init__(self, layer_sizes: list[int]):
-        self.t = 0.0   # internal time
-        self.dt = 0.001  # 1ms timestep (biological)
+        self.t = 0.0
+        self.dt = 0.001
         
-        # Neurons banao
         self.layers: list[list[Neuron]] = []
         neuron_id = 0
         for size in layer_sizes:
@@ -93,47 +84,30 @@ class RealtimeBrain:
             self.layers.append(layer)
             neuron_id += size
         
-        # Synapses banao (har layer ko next se connect karo)
         self.synapses: dict[tuple, Synapse] = {}
         for li in range(len(self.layers) - 1):
             for pre in self.layers[li]:
                 for post in self.layers[li + 1]:
                     self.synapses[(pre.id, post.id)] = Synapse()
         
-        # Dopamine system
-        self.dopamine        = 0.0   # current level
-        self.dopamine_decay  = 0.95  # per step decay
-        
-        # Memory consolidation
-        self.experience_log: list[dict] = []
-        self.consolidated   = {}  # longterm memory
-        
-        # Lateral Inhibition (Muqabala)
-        # Reduced slightly to allow neurons to stay alive while competing
+        self.dopamine        = 0.0
+        self.dopamine_decay  = 0.95
         self.inhibition_strength = 0.5
-
-        # Success Lock
         self.frozen = False
-
-        # Stats
         self.total_spikes   = 0
         self.learning_steps = 0
     
-    # ── Core: Forward Pass ──────────────────────────────────────────
-    
+    def reset_network_state(self):
+        for layer in self.layers:
+            for neuron in layer:
+                neuron.reset()
+
     def step(self, inputs: np.ndarray) -> np.ndarray:
-        """
-        Ek timestep — inputs dalo, output lo
-        Sab kuch realtime hota hai
-        """
         self.t += self.dt
-        
-        # Layer 0 ko input dena
         spikes_per_layer = []
         current_spikes   = []
         
         for i, neuron in enumerate(self.layers[0]):
-            # Input scaling: 3.0 multiplier for stronger stimulus
             fired = neuron.receive(
                 (inputs[i] * 3.0) if i < len(inputs) else 0.0,
                 self.t
@@ -141,229 +115,119 @@ class RealtimeBrain:
             current_spikes.append(fired)
         spikes_per_layer.append(current_spikes)
         
-        # Baaki layers propagate karo
         for li in range(1, len(self.layers)):
             prev_spikes  = spikes_per_layer[li - 1]
-            layer_spikes = []
+            layer_neurons = self.layers[li]
+            layer_spikes = [False] * len(layer_neurons)
             
-            # current layer neurons
-            current_layer = self.layers[li]
+            # Randomized order to prevent directional bias
+            indices = list(range(len(layer_neurons)))
+            np.random.shuffle(indices)
 
-            for post in current_layer:
+            for idx in indices:
+                post = layer_neurons[idx]
                 total_input = 0.0
-                
                 for pi, pre in enumerate(self.layers[li - 1]):
-                    if prev_spikes[pi]:  # pre ne fire kiya
+                    if prev_spikes[pi]:
                         syn = self.synapses.get((pre.id, post.id))
                         if syn:
                             total_input      += syn.weight
                             syn.last_pre      = self.t
                             if not self.frozen:
-                                # Eligibility trace update
-                                syn.eligibility   = (
-                                    syn.eligibility * 0.9 + 0.1
-                                )
+                                syn.eligibility = (syn.eligibility * 0.9 + 0.1)
                 
                 fired = post.receive(total_input, self.t)
-                layer_spikes.append(fired)
+                layer_spikes[idx] = fired
                 if fired:
                     self.total_spikes += 1
-                    # Lateral Inhibition: Peer neurons (same layer) ko dabbao
-                    for peer in current_layer:
+                    # Lateral Inhibition
+                    for peer in layer_neurons:
                         if peer.id != post.id:
                             peer.voltage -= self.inhibition_strength
             
             spikes_per_layer.append(layer_spikes)
         
-        # STDP learning apply karo
         if not self.frozen:
             self._stdp_update(spikes_per_layer)
         
-        # Dopamine decay
         self.dopamine *= self.dopamine_decay
-        
-        # Homeostasis (neurons ko balance rakhna)
-        # Frequent checks for faster scaling
-        if self.learning_steps % 100 == 0:
+        if not self.frozen and self.learning_steps % 100 == 0:
             self._homeostasis()
         
         self.learning_steps += 1
-        
-        # Output layer spikes return karo
         return np.array(spikes_per_layer[-1], dtype=float)
     
-    # ── STDP: Spike Timing Learning ─────────────────────────────────
-    
     def _stdp_update(self, spikes_per_layer):
-        """
-        Hebbian learning (Integrated from stdplearn.py)
-        Jo neurons saath fire hote hain, woh wire ho jaate hain!
-        """
-        if self.frozen: return # Success Lock: Permanent Memory!
-
-        A_plus  = 0.1     # Balanced
-        A_minus = 0.2     # Strong Pruning
-        tau     = 0.02    # Standard window
+        if self.frozen: return
+        A_plus, A_minus, tau = 0.1, 0.2, 0.02
         
         for li in range(len(self.layers) - 1):
             for pi, pre in enumerate(self.layers[li]):
-                for post in self.layers[li + 1]:
+                for post_idx, post in enumerate(self.layers[li + 1]):
                     syn = self.synapses.get((pre.id, post.id))
-                    if not syn:
-                        continue
+                    if not syn: continue
                     
                     pre_fired  = spikes_per_layer[li][pi]
-                    post_fired = spikes_per_layer[li + 1][
-                        self.layers[li + 1].index(post)
-                    ]
-                    
+                    post_fired = spikes_per_layer[li + 1][post_idx]
                     dw = 0.0
 
-                    # 1. Post fired: check pre history (Strengthen)
                     if post_fired and pre.last_spike > -np.inf:
                         dt = self.t - pre.last_spike
-                        if 0 <= dt < 0.1:
-                            dw += A_plus * np.exp(-dt / tau)
+                        if 0 <= dt < 0.1: dw += A_plus * np.exp(-dt / tau)
 
-                    # 2. Pre fired: check post history (Weaken)
                     if pre_fired and post.last_spike > -np.inf:
                         dt = self.t - post.last_spike
-                        if 0 < dt < 0.1: # dt > 0 strictly to avoid double-counting same-step
-                            dw -= A_minus * np.exp(-dt / tau)
+                        if 0 < dt < 0.1: dw -= A_minus * np.exp(-dt / tau)
 
                     if dw != 0:
-                        # Dopamine modulate karta hai learning
-                        # Pruning: Pattern mismatch hone par A_minus (unlearning) ko 2x fast kar do
-                        if dw < 0 and self.dopamine < 0:
-                            dw *= 2.0
-
+                        if dw < 0 and self.dopamine < 0: dw *= 2.0
                         dw *= (1 + self.dopamine * 2)
 
-                        # Weight update with Soft Normalization
                         old_weight = syn.weight
-                        syn.weight = np.clip(old_weight + dw, 0.01, 1.2) # Hard Cap 1.2
-
-                        # Soft Normalization: Agar weight badha, toh baaki connections proportionally kam karo
+                        syn.weight = np.clip(old_weight + dw, 0.01, 1.2)
                         if syn.weight > old_weight:
                             for other_post in self.layers[li + 1]:
                                 if other_post.id != post.id:
                                     other_syn = self.synapses.get((pre.id, other_post.id))
-                                    if other_syn:
-                                        other_syn.weight = np.clip(other_syn.weight - 0.01, 0.01, 1.2)
-    
-    # ── Dopamine: Reward Signal ──────────────────────────────────────
+                                    if other_syn: other_syn.weight = np.clip(other_syn.weight - 0.01, 0.01, 1.2)
     
     def reward(self, amount: float = 1.0):
-        """
-        "Yeh accha tha" — weights strengthen karo
-        Jaise brain mein dopamine release hota hai
-        """
-        if self.frozen: return # permanent memory locked!
-
+        if self.frozen: return
         self.dopamine = min(self.dopamine + amount, 10.0)
-        
-        # Eligibility traces pe dopamine apply karo
-        # (jo recently active tha woh strengthen hoga)
         for syn in self.synapses.values():
             if syn.eligibility > 0.1:
-                syn.weight = np.clip(
-                    syn.weight + 0.2 * syn.eligibility * amount,
-                    0.01, 1.2 # Hard Cap 1.2
-                )
-                syn.eligibility *= 0.5  # use ho gaya
-    
-    def punish(self, amount: float = 1.0):
-        """
-        "Yeh galat tha" — jo hua woh weaken karo
-        Negative dopamine (adrenaline jaise)
-        """
-        if self.frozen: return # permanent memory locked!
-
-        self.dopamine = max(self.dopamine - amount, -20.0)
-        
-        for syn in self.synapses.values():
-            if syn.eligibility > 0.1:
-                syn.weight = np.clip(
-                    syn.weight - 0.2 * syn.eligibility * amount,
-                    0.01, 1.2 # Hard Cap 1.2
-                )
+                syn.weight = np.clip(syn.weight + 0.2 * syn.eligibility * amount, 0.01, 1.2)
                 syn.eligibility *= 0.5
     
-    # ── Homeostasis: Self-Regulation ────────────────────────────────
-    
-    def _homeostasis(self):
-        """
-        Homeostatic Scaling — competitive balance
-        Neuron 0 bahut fire karega → threshold upar (Tired)
-        Neuron 1 fire nahi karega → threshold neeche (Eager)
-        """
-        if self.frozen: return # Success Lock: Permanent Memory!
+    def punish(self, amount: float = 1.0):
+        if self.frozen: return
+        self.dopamine = max(self.dopamine - amount, -20.0)
+        for syn in self.synapses.values():
+            if syn.eligibility > 0.1:
+                syn.weight = np.clip(syn.weight - 0.2 * syn.eligibility * amount, 0.01, 1.2)
+                syn.eligibility *= 0.5
 
-        target_rate = 0.05  # Lower target for sparse coding
-        
+    def _homeostasis(self):
+        if self.frozen: return
+        target_rate = 0.05
         for layer in self.layers:
             for neuron in layer:
-                recent = [
-                    s for s in neuron.spike_history
-                    if self.t - s < 0.5
-                ]
+                recent = [s for s in neuron.spike_history if self.t - s < 0.5]
                 actual_rate = len(recent) / 0.5
-
-                if actual_rate > target_rate:
-                    neuron.threshold += 0.01  # Slow scaling
-                elif actual_rate < target_rate * 0.1:
-                    neuron.threshold -= 0.005 # Slow scaling
-
-                # Dynamic range for extreme sensitivity
+                if actual_rate > target_rate: neuron.threshold += 0.01
+                elif actual_rate < target_rate * 0.1: neuron.threshold -= 0.005
                 neuron.threshold = np.clip(neuron.threshold, 0.01, 1.0)
     
-    # ── Consolidation: Long-term Memory ─────────────────────────────
-    
-    def consolidate(self):
-        """
-        "Neend" wala mechanism — important cheezein save karo
-        
-        Jo synapses frequently active hain
-        aur dopamine ke saath fire hue hain
-        → woh stable ho jaate hain (longterm memory)
-        """
-        consolidated_count = 0
-        
-        for (pre_id, post_id), syn in self.synapses.items():
-            # High weight + recently used = important
-            importance = abs(syn.weight) * syn.eligibility
-            
-            if importance > 0.3:
-                # Yeh connection important hai
-                self.consolidated[(pre_id, post_id)] = syn.weight
-                consolidated_count += 1
-                
-                # Consolidated connections decay nahi karte
-                syn.eligibility = 0  # reset trace
-        
-        if consolidated_count > 0:
-            print(f"Consolidated {consolidated_count} connections")
-        return consolidated_count
-
     def normalize_weights(self, target_avg: float = 1.0):
-        """
-        Weight Normalization — weights ko stable rakho
-        """
         weights = [s.weight for s in self.synapses.values()]
         if not weights: return
-
         current_avg = np.mean(weights)
         if current_avg == 0: return
-
         factor = target_avg / current_avg
         for syn in self.synapses.values():
             syn.weight = np.clip(syn.weight * factor, 0.01, 1.2)
 
     def apply_manual_controls(self):
-        """
-        'Manual God' Control — control.txt se weights set karo
-        Usage: SET 4->12 0.5
-        """
         try:
             with open("control.txt", "r") as f:
                 lines = f.readlines()
@@ -376,215 +240,115 @@ class RealtimeBrain:
                         if (pre, post) in self.synapses:
                             self.synapses[(pre, post)].weight = np.clip(val, 0.01, 1.2)
                             print(f"Manual Control: Synapse {pre}->{post} set to {val}")
-            # Clear file after reading to avoid repeated execution
             open("control.txt", "w").close()
-        except FileNotFoundError:
-            pass
-        except Exception as e:
-            print(f"Manual Control Error: {e}")
-
-    # ── Inference Mode ───────────────────────────────────────────────
+        except FileNotFoundError: pass
+        except Exception as e: print(f"Manual Control Error: {e}")
 
     def run_inference(self, pattern_A, pattern_B, episodes=100):
-        """
-        Inference Mode — bina lalach (dopamine) ke test karo
-        """
         print("\n--- Starting AI Brain Inference (Test Mode) ---")
-        self.frozen = True  # lock weights
-        self.dopamine = 0.0 # reset dopamine
-
-        correct_A = 0
-        correct_B = 0
-
+        self.frozen = True
+        self.dopamine = 0.0
+        correct_A = correct_B = 0
         for episode in range(episodes):
-            # Test Pattern A
+            self.reset_network_state()
             out_A = np.zeros(len(self.layers[-1]))
-            for _ in range(100):
-                out_A += self.step(pattern_A * 20.0)
-
-            if out_A.sum() > 0 and np.argmax(out_A) == 0:
-                correct_A += 1
-
-            # Rest
-            for _ in range(10): self.step(np.zeros(4))
-
-            # Test Pattern B
+            for _ in range(100): out_A += self.step(pattern_A * 50.0)
+            if out_A.sum() > 0 and np.argmax(out_A) == 0: correct_A += 1
+            for _ in range(20): self.step(np.zeros(4))
+            self.reset_network_state()
             out_B = np.zeros(len(self.layers[-1]))
-            for _ in range(100):
-                out_B += self.step(pattern_B * 20.0)
-
-            if out_B.sum() > 0 and np.argmax(out_B) == 1:
-                correct_B += 1
-
+            for _ in range(100): out_B += self.step(pattern_B * 50.0)
+            if out_B.sum() > 0 and np.argmax(out_B) == 1: correct_B += 1
             if (episode + 1) % 20 == 0:
                 print(f"Episode {episode+1}/{episodes} | Accuracy A: {correct_A/(episode+1):.2%} | B: {correct_B/(episode+1):.2%}")
+        print(f"\nResults: A: {correct_A/episodes:.2%}, B: {correct_B/episodes:.2%}")
 
-        print("\n--- Inference Results (Per-Pattern Breakdown) ---")
-        print(f"Pattern A: {correct_A}/{episodes} ({correct_A/episodes:.2%}) {'✅' if correct_A/episodes > 0.9 else '❌'}")
-        print(f"Pattern B: {correct_B}/{episodes} ({correct_B/episodes:.2%}) {'✅' if correct_B/episodes > 0.9 else '❌'}")
-
-        overall_acc = (correct_A + correct_B) / (2 * episodes)
-        print(f"Overall Accuracy: {overall_acc:.2%}")
-
-        if overall_acc > 0.9:
-            print("Dimaag ne bina lalach ke zabardast perform kiya! Phase 1 Successful. ✅")
-        else:
-            print("Dimaag thoda confuse hai, shayad aur training ki zaroorat hai. ⚠️")
-
-    # ── Stats ────────────────────────────────────────────────────────
-    
     def show_weights(self):
-        """
-        Weight Visualizer — weights ko map mein save karo
-        """
         with open("weights_map.txt", "w") as f:
             f.write(f"Brain Time: {self.t:.2f}s | Mode: {'Frozen' if self.frozen else 'Training'}\n")
             f.write("-" * 50 + "\n")
             for (pre, post), syn in sorted(self.synapses.items()):
-                # Visual ASCII bar (scaled to 1.2 max)
                 filled = int((syn.weight / 1.2) * 20)
                 bar = "[" + "#" * filled + "-" * (20 - filled) + "]"
                 f.write(f"S[{pre:02}->{post:02}]: {syn.weight:.3f} {bar}\n")
-        # Console pe summary dikhao
-        avg = np.mean([s.weight for s in self.synapses.values()])
-        print(f"Weights map updated (Avg: {avg:.3f})")
+        print(f"Weights map updated (Avg: {np.mean([s.weight for s in self.synapses.values()]):.3f})")
 
-    def reset_fatigue(self):
-        """
-        Emergency Fatigue Reset
-        """
-        for layer in self.layers:
-            for neuron in layer:
-                neuron.fatigue = 0.0
-
-    def status(self):
+    def status(self, acc_A, acc_B, is_assisted):
         weights = [s.weight for s in self.synapses.values()]
-        return (
-            f"T:{self.t:.2f}s | "
-            f"Spikes:{self.total_spikes} | "
-            f"W_avg:{np.mean(weights):.3f} | "
-            f"DA:{self.dopamine:.2f} | "
-            f"Mem:{len(self.consolidated)}"
-        )
+        return (f"T:{self.t:.2f}s | Spikes:{self.total_spikes} | W_avg:{np.mean(weights):.3f} | "
+                f"Acc A: {acc_A:.0%}, B: {acc_B:.0%} | Assisted: {'YES' if is_assisted else 'NO'}")
+
 if __name__ == "__main__":
-    # 1. Brain setup: 4 inputs -> 8 hidden -> 2 outputs
-    my_brain = RealtimeBrain(layer_sizes=[4, 8, 2])
-
-
-    
-
-    # 2. Training data (Patterns)
-    pattern_A = np.array([1.0, 0.0, 1.0, 0.0]) # Maan lo ye "Right" signal hai
-
-
-
-
-    pattern_B = np.array([0.0, 1.0, 0.0, 1.0]) # Maan lo ye "Left" signal hai
-
-
-
+    my_brain = RealtimeBrain(layer_sizes=[4, 16, 2])
+    pattern_A = np.array([1.0, 0.0, 1.0, 0.0])
+    pattern_B = np.array([0.0, 1.0, 0.0, 1.0])
 
     if "--test" in sys.argv:
         my_brain.run_inference(pattern_A, pattern_B)
     else:
         print("\n--- Starting AI Brain Training ---")
-
-        # History for Balanced Success Lock
         history_A = deque(maxlen=20)
         history_B = deque(maxlen=20)
-        acc_A, acc_B = 0.0, 0.0
+        history_assisted = deque(maxlen=20)
+        acc_A = acc_B = 0.0
 
-        for episode in range(500):
-            my_brain.total_spikes = 0 # Reset for episodic stats
-            my_brain.apply_manual_controls() # God mode check
+        for episode in range(1000):
+            my_brain.total_spikes = 0
+            my_brain.apply_manual_controls()
 
-            if (episode + 1) % 50 == 0:
-                print(f"\nEpisode {episode + 1}")
-
-            success_A = 0
-            success_B = 0
-
-            # Targeted Recovery multipliers & Threshold assistance
+            is_assisted = False
             reward_mult_A = 1.0
             reward_mult_B = 1.0
-            if len(history_A) == 20:
-                if acc_A < 0.3: # Critical recovery
-                    reward_mult_A = 3.0
-                    my_brain.layers[-1][0].threshold = max(0.01, my_brain.layers[-1][0].threshold - 0.02)
-                    my_brain.reset_fatigue()
-                if acc_B < 0.3: # Critical recovery
-                    reward_mult_B = 3.0
-                    my_brain.layers[-1][1].threshold = max(0.01, my_brain.layers[-1][1].threshold - 0.02)
-                    my_brain.reset_fatigue()
 
-            # Inhibition Reset logic
-            if not my_brain.frozen and len(history_A) == 20 and (acc_A < 0.1 or acc_B < 0.1):
-                 current_inhibition = 0.1 # Temporarily reduce to let neurons breathe
-            else:
-                 current_inhibition = 0.5
-            my_brain.inhibition_strength = current_inhibition
+            if not my_brain.frozen and len(history_A) == 20:
+                if acc_A < 0.3 or acc_B < 0.3:
+                    is_assisted = True
+                    my_brain.inhibition_strength = 0.1
+                    if acc_A < 0.3: reward_mult_A = 2.0
+                    if acc_B < 0.3: reward_mult_B = 2.0
+                else:
+                    my_brain.inhibition_strength = 0.5
 
-            # 1. Pattern A dikhao
+            # Trial A
+            my_brain.reset_network_state()
+            for _ in range(50): my_brain.step(np.zeros(4))
             out_A = np.zeros(len(my_brain.layers[-1]))
-            for _ in range(100):
-                step_out = my_brain.step(pattern_A * 20.0)
-                out_A += step_out
+            for _ in range(100): out_A += my_brain.step(pattern_A * 50.0)
+            success_A = 1 if (out_A.sum() > 0 and np.argmax(out_A) == 0) else 0
+            if success_A: my_brain.reward(2.0 * reward_mult_A)
+            elif out_A.sum() > 0: my_brain.punish(2.0)
 
-            if out_A.sum() > 0:
-                action = np.argmax(out_A)
-                if action == 0:
-                    my_brain.reward(2.0 * reward_mult_A)
-                    success_A = 1
-                    if (episode + 1) % 50 == 0: print(f"Pattern A -> Neuron {action}: Sahi! (Dopamine)")
-                else:
-                    my_brain.punish(2.0)
-                    if (episode + 1) % 50 == 0: print(f"Pattern A -> Neuron {action}: Galat!")
-            elif (episode + 1) % 50 == 0:
-                print("Pattern A: No Spikes")
-
-            # Small rest period
-            for _ in range(10): my_brain.step(np.zeros(4))
-
-            # 2. Pattern B dikhao
+            # Trial B
+            my_brain.reset_network_state()
+            for _ in range(50): my_brain.step(np.zeros(4))
             out_B = np.zeros(len(my_brain.layers[-1]))
-            for _ in range(100):
-                step_out = my_brain.step(pattern_B * 20.0)
-                out_B += step_out
+            for _ in range(100): out_B += my_brain.step(pattern_B * 50.0)
+            success_B = 1 if (out_B.sum() > 0 and np.argmax(out_B) == 1) else 0
+            if success_B: my_brain.reward(4.0 * reward_mult_B)
+            elif out_B.sum() > 0: my_brain.punish(2.0)
 
-            if out_B.sum() > 0:
-                action = np.argmax(out_B)
-                if action == 1:
-                    my_brain.reward(5.0 * reward_mult_B) # Bonus + Multiplier
-                    success_B = 1
-                    if (episode + 1) % 50 == 0: print(f"Pattern B -> Neuron {action}: Sahi! (Bonus Dopamine)")
-                else:
-                    my_brain.punish(2.0)
-                    if (episode + 1) % 50 == 0: print(f"Pattern B -> Neuron {action}: Galat!")
-            elif (episode + 1) % 50 == 0:
-                print("Pattern B: No Spikes")
-
-            # Balanced Success Lock checking
             history_A.append(success_A)
             history_B.append(success_B)
+            history_assisted.append(is_assisted)
+            acc_A, acc_B = sum(history_A)/len(history_A), sum(history_B)/len(history_B)
 
-            acc_A = sum(history_A) / len(history_A) if len(history_A) > 0 else 0
-            acc_B = sum(history_B) / len(history_B) if len(history_B) > 0 else 0
+            # CRITICAL FIX: STRICT AND LOCK
+            # Lock ONLY if BOTH reach 95% threshold AND no assistance was used in the window.
+            if not my_brain.frozen and len(history_A) == 20:
+                # STRICT INDEPENDENT AND CONDITION
+                if (acc_A >= 0.95) and (acc_B >= 0.95):
+                    # Stability Guard: Ensure no assistance was active in the entire 20-episode window
+                    if not any(history_assisted):
+                        my_brain.frozen = True
+                        print(f"\n!!! Balanced Success Lock at Episode {episode+1} !!!")
+                        print(f"Independent Accuracies Verified: [Acc A: {acc_A:.0%}] AND [Acc B: {acc_B:.0%}]")
+                        my_brain.show_weights()
 
-            if acc_A > 0.95 and acc_B > 0.95 and len(history_A) == 20 and not my_brain.frozen:
-                my_brain.frozen = True
-                print(f"!!! Balanced Success Lock at Episode {episode+1}: Accuracy > 95%! !!!")
-                my_brain.show_weights() # Map save karo
-
-            # Weight Normalization & Memory Decay
             if not my_brain.frozen:
-                for syn in my_brain.synapses.values():
-                    syn.weight *= 0.9999 # Very slow decay to hold onto Sahi! connections
-                my_brain.normalize_weights(target_avg=1.0)
+                for syn in my_brain.synapses.values(): syn.weight *= 0.9999
+                if (episode + 1) % 10 == 0: my_brain.normalize_weights(target_avg=0.8)
 
-            # Auto-update Weight Map
             if (episode + 1) % 5 == 0:
                 my_brain.show_weights()
-
                 if (episode + 1) % 50 == 0:
-                    print(f"Stats: {my_brain.status()} | Acc_A: {acc_A:.0%} | Acc_B: {acc_B:.0%}")
-
+                    print(f"Stats: {my_brain.status(acc_A, acc_B, is_assisted)}")
