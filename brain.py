@@ -4,6 +4,7 @@ import time
 import sys
 
 class Synapse:
+    """Ek synapse jo do neurons ko jodta hai (connection)."""
     def __init__(self):
         self.weight   = np.random.uniform(0.3, 0.6)
         self.last_pre  = -np.inf
@@ -12,6 +13,7 @@ class Synapse:
 
 
 class Neuron:
+    """Ek biological neuron jo spike generate karta hai."""
     def __init__(self, neuron_id):
         self.id            = neuron_id
         self.voltage       = 0.0
@@ -22,6 +24,7 @@ class Neuron:
         self.refractory    = 0
         self.last_spike    = -np.inf
         self.fatigue       = 0.0
+        self.gain          = 1.0      # Global Synaptic Scaling factor
         self.spike_history = deque(maxlen=100)
     
     def receive(self, current: float, t: float) -> bool:
@@ -29,15 +32,25 @@ class Neuron:
             self.refractory -= 1
             return False
 
-        self.fatigue *= 0.8
-        self.voltage = (self.voltage * self.decay + (current + self.bias) + self.rest * (1 - self.decay))
+        # Biologically inspired fatigue (Short-term adaptation)
+        self.fatigue *= 0.9
         
-        eff_threshold = self.threshold + (self.fatigue * 2.0)
+        # Apply Gain (Synaptic Scaling)
+        eff_current = current * self.gain
+        self.voltage = (self.voltage * self.decay + (eff_current + self.bias) + self.rest * (1 - self.decay))
+
+        # Accelerated Intrinsic Plasticity: Sensitization increases quickly when silent
+        if t - self.last_spike > 0.1: # 100ms of silence
+            self.threshold = max(0.01, self.threshold - 0.001) # 10x faster decay
+            self.voltage += 0.005 # Faster sub-threshold sensitization
+
+        # Effective threshold rises sharply with fatigue (Exhaustion)
+        eff_threshold = self.threshold + (self.fatigue * 8.0) # Even more impact
 
         if self.voltage >= eff_threshold:
             self.voltage    = self.rest
-            self.refractory = 2
-            self.fatigue   += 1.0
+            self.refractory = 4           # Longer refractory period
+            self.fatigue   += 3.0         # Heavier exhaustion increment
             self.last_spike = t
             self.spike_history.append(t)
             return True
@@ -50,6 +63,7 @@ class Neuron:
 
 
 class RealtimeBrain:
+    """Poora neural network jo patterns seekhta hai (Brain simulation)."""
     def __init__(self, layer_sizes: list[int]):
         self.t = 0.0
         self.dt = 0.001
@@ -68,7 +82,7 @@ class RealtimeBrain:
         
         self.dopamine        = 0.0
         self.dopamine_decay  = 0.95
-        self.layer_inhibs    = [0.0, 0.4, 1.2]
+        self.layer_inhibs    = [0.0, 0.5, 2.5] # Stronger competition in output
 
         self.acc_A = 0.0
         self.acc_B = 0.0
@@ -105,12 +119,6 @@ class RealtimeBrain:
 
             inhib_strength = self.layer_inhibs[li] if li < len(self.layer_inhibs) else 0.5
 
-            # If nothing happened recently, neurons get desperate (sensitization)
-            if not self.frozen:
-                for n in layer_neurons:
-                    if self.t - n.last_spike > 0.1: # 100ms of silence
-                        n.voltage += 0.005 # Slowly drift towards threshold
-
             for idx in indices:
                 post = layer_neurons[idx]
                 total_input = 0.0
@@ -118,14 +126,7 @@ class RealtimeBrain:
                     if prev_spikes[pi]:
                         syn = self.synapses.get((pre.id, post.id))
                         if syn:
-                            # Synaptic scaling: boost input if target is struggling
-                            weight_mult = 1.0
-                            if not self.frozen and li == len(self.layers)-1:
-                                if post.id % self.layers[-1][0].id == 1:
-                                    if self.acc_B < 0.2: weight_mult = 5.0 # Aggressive boost
-                                    elif self.acc_B < 0.5: weight_mult = 2.0
-
-                            total_input += syn.weight * weight_mult
+                            total_input += syn.weight
                             if not self.frozen:
                                 # Pre-synaptic activity leaves a trace
                                 syn.eligibility = min(syn.eligibility + 0.5, 10.0)
@@ -156,8 +157,8 @@ class RealtimeBrain:
     
     def _stdp_update(self, spikes_per_layer):
         if self.frozen: return
-        # Fine-grained STDP
-        A_plus, A_minus, tau = 0.02, 0.04, 0.02
+        # Robust STDP to allow autonomous learning to catch up
+        A_plus, A_minus, tau = 0.1, 0.2, 0.02
         for li in range(len(self.layers) - 1):
             for pi, pre in enumerate(self.layers[li]):
                 for post_idx, post in enumerate(self.layers[li + 1]):
@@ -203,15 +204,22 @@ class RealtimeBrain:
     def _homeostasis(self):
         if self.frozen: return
         for li, layer in enumerate(self.layers):
-            # Higher target rate for output neurons to ensure they are responsive
-            target_rate = 5.0 if li == len(self.layers) - 1 else 0.5
+            # Target firing rates (Hz)
+            target_rate = 1.0 if li == len(self.layers) - 1 else 0.1
             for neuron in layer:
-                recent = [s for s in neuron.spike_history if self.t - s < 0.5]
-                actual_rate = len(recent) / 0.5
-                if actual_rate > target_rate: neuron.threshold += 0.002
-                elif actual_rate < target_rate * 0.1: neuron.threshold -= 0.001
-                # Output neurons allowed higher threshold to prevent noise firing
-                max_thresh = 2.0 if li == len(self.layers) - 1 else 1.0
+                recent = [s for s in neuron.spike_history if self.t - s < 1.0]
+                actual_rate = len(recent) / 1.0
+
+                # Biologically plausible homeostasis
+                if actual_rate > target_rate:
+                    neuron.threshold += 0.005  # Threshold rises if overactive
+                    neuron.gain = max(0.5, neuron.gain - 0.05) # Reduce gain if overactive
+                elif actual_rate < target_rate * 0.1:
+                    neuron.threshold -= 0.002  # Threshold drops if underactive
+                    neuron.gain = min(5.0, neuron.gain + 0.1) # Increase gain if underactive
+
+                # Clamp thresholds
+                max_thresh = 0.5 if li == len(self.layers) - 1 else 0.2
                 neuron.threshold = np.clip(neuron.threshold, 0.01, max_thresh)
     
     def normalize_weights(self, target_avg: float = 1.0):
@@ -269,10 +277,10 @@ class RealtimeBrain:
                 f.write(f"S[{pre:02}->{post:02}]: {syn.weight:.3f} {bar}\n")
         print(f"Weights map updated (Avg: {np.mean([s.weight for s in self.synapses.values()]):.3f})")
 
-    def status(self, is_assisted):
+    def status(self):
         weights = [s.weight for s in self.synapses.values()]
         return (f"T:{self.t:.2f}s | W_avg:{np.mean(weights):.3f} | "
-                f"Acc A: {self.acc_A:.0%}, B: {self.acc_B:.0%} | Assisted: {'YES' if is_assisted else 'NO'}")
+                f"Acc A: {self.acc_A:.0%}, B: {self.acc_B:.0%}")
 
 if __name__ == "__main__":
     # Optimization: 128 hidden neurons for better feature separation
@@ -284,42 +292,14 @@ if __name__ == "__main__":
         my_brain.run_inference(pattern_A, pattern_B)
     else:
         print("\n--- Starting AI Brain Training ---")
-        history_A, history_B, history_assisted = deque(maxlen=20), deque(maxlen=20), deque(maxlen=20)
+        history_A, history_B = deque(maxlen=20), deque(maxlen=20)
 
         for episode in range(1000):
             my_brain.total_spikes = 0
             my_brain.apply_manual_controls()
 
-            is_assisted = False
-
-            if not my_brain.frozen and len(history_A) == 20:
-                # Targeted threshold reduction for the underdog
-                if my_brain.acc_A < 0.25:
-                     my_brain.layers[-1][0].threshold = max(0.01, my_brain.layers[-1][0].threshold - 0.005)
-                     is_assisted = True
-                if my_brain.acc_B < 0.25:
-                     my_brain.layers[-1][1].threshold = max(0.01, my_brain.layers[-1][1].threshold - 0.005)
-                     is_assisted = True
-
-            # Anti-Bully: Balance output thresholds
-            if not my_brain.frozen and len(history_A) == 20:
-                if my_brain.acc_A > my_brain.acc_B + 0.3:
-                     my_brain.layers[-1][0].threshold = min(0.3, my_brain.layers[-1][0].threshold + 0.002)
-                elif my_brain.acc_B > my_brain.acc_A + 0.3:
-                     my_brain.layers[-1][1].threshold = min(0.3, my_brain.layers[-1][1].threshold + 0.002)
-
-            # Balanced Curriculum & Active Skip
-            trial_queue = []
-            # More moderate skip to prevent complete forgetting/starvation
-            if my_brain.acc_A > 0.9 and my_brain.acc_B < 0.7:
-                if np.random.random() < 0.4: trial_queue.append('A')
-            else:
-                trial_queue.append('A')
-
-            # Always try B if it's failing
-            trial_queue.append('B')
-            if my_brain.acc_B < 0.5: trial_queue.append('B')
-
+            # Simple 50/50 Curriculum
+            trial_queue = ['A', 'B']
             np.random.shuffle(trial_queue)
 
             success_A_ep, success_B_ep = 0, 0
@@ -327,59 +307,34 @@ if __name__ == "__main__":
                 my_brain.reset_network_state()
                 for _ in range(50): my_brain.step(np.zeros(4))
 
-                if t_type == 'A':
-                    out = np.zeros(2)
-                    # Lower input power for A if it's too dominant
-                    pwr = 40.0 if my_brain.acc_A > 0.9 else 80.0
-                    for _ in range(100): out += my_brain.step(pattern_A * pwr)
-                    if out.sum() > 0:
-                        action = np.argmax(out)
-                        if action == 0:
-                            # Diminishing returns for A
-                            rew = 0.5 if my_brain.acc_A > 0.9 else 2.0
-                            my_brain.reward(rew)
-                            success_A_ep = 1
-                        else:
-                            my_brain.punish_neuron(action, amount=20.0) # Heavier punishment
+                input_pattern = pattern_A if t_type == 'A' else pattern_B
+                target_neuron = 0 if t_type == 'A' else 1
+
+                out = np.zeros(2)
+                # Equal power for all patterns
+                for _ in range(100): out += my_brain.step(input_pattern * 100.0)
+
+                if out.sum() > 0:
+                    action = np.argmax(out)
+                    if action == target_neuron:
+                        # Sahi action ke liye reward
+                        my_brain.reward(5.0)
+                        if t_type == 'A': success_A_ep = 1
+                        else: success_B_ep = 1
                     else:
-                        my_brain.layers[-1][0].threshold = max(0.01, my_brain.layers[-1][0].threshold - 0.002)
-                else:
-                    out = np.zeros(2)
-                    # Boost B input to overcome noise/inhibition
-                    for _ in range(100): out += my_brain.step(pattern_B * 120.0)
-                    if out.sum() > 0:
-                        action = np.argmax(out)
-                        if action == 1:
-                            my_brain.reward(10.0) # Massive reward for B success
-                            success_B_ep = 1
-                        else:
-                            # If it's B trial but A fires, punish A heavily
-                            my_brain.punish_neuron(action, amount=30.0) # Heavier punishment
-                    else:
-                        # Underdog Kickstart: If B is silent, lower threshold AND boost weights slightly
-                        my_brain.layers[-1][1].threshold = max(0.005, my_brain.layers[-1][1].threshold - 0.005)
-                        if my_brain.acc_B < 0.2:
-                            # Aggressive Bootstrapping: Force input->hidden weights up for Pattern B
-                            for i in [1, 3]:
-                                for post in my_brain.layers[1]:
-                                    syn = my_brain.synapses.get((my_brain.layers[0][i].id, post.id))
-                                    if syn and syn.weight < 0.4:
-                                        syn.weight = np.random.uniform(0.4, 0.7)
-                            # Also slightly lower hidden thresholds to encourage any activity
-                            for n in my_brain.layers[1]:
-                                n.threshold = max(0.01, n.threshold - 0.01)
+                        # Galat action ke liye punishment aur thakaan (Exhaustion)
+                        my_brain.layers[-1][action].fatigue += 5.0
+                        my_brain.punish_neuron(action, amount=20.0)
 
             history_A.append(success_A_ep)
             history_B.append(success_B_ep)
-            history_assisted.append(is_assisted)
             my_brain.acc_A, my_brain.acc_B = sum(history_A)/len(history_A), sum(history_B)/len(history_B)
 
             if not my_brain.frozen and len(history_A) == 20:
                 if (my_brain.acc_A >= 0.95) and (my_brain.acc_B >= 0.95):
-                    if not any(history_assisted):
-                        my_brain.frozen = True
-                        print(f"\n!!! Balanced Success Lock at Episode {episode+1} !!!")
-                        my_brain.show_weights()
+                    my_brain.frozen = True
+                    print(f"\n!!! Balanced Success Lock at Episode {episode+1} !!!")
+                    my_brain.show_weights()
 
             if not my_brain.frozen:
                 for syn in my_brain.synapses.values(): syn.weight *= 0.9999
@@ -390,5 +345,5 @@ if __name__ == "__main__":
                 my_brain.show_weights()
                 if (episode + 1) % 10 == 0:
                     print(f"Output Thresholds: {[f'{n.threshold:.3f}' for n in my_brain.layers[-1]]}")
-                    print(f"Stats: {my_brain.status(is_assisted)}")
+                    print(f"Stats: {my_brain.status()}")
                     sys.stdout.flush()
