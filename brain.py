@@ -10,6 +10,7 @@ class Synapse:
         self.last_pre  = -np.inf
         self.last_post = -np.inf
         self.eligibility = 0.0
+        self.depression  = 1.0  # Boredom (Short-Term Synaptic Depression)
 
 
 class Neuron:
@@ -82,7 +83,7 @@ class RealtimeBrain:
         
         self.dopamine        = 0.0
         self.dopamine_decay  = 0.95
-        self.layer_inhibs    = [0.0, 0.5, 2.5] # Stronger competition in output
+        self.layer_inhibs    = [0.0, 1.2, 5.0] # Aggressive Lateral Inhibition
 
         self.acc_A = 0.0
         self.acc_B = 0.0
@@ -126,10 +127,13 @@ class RealtimeBrain:
                     if prev_spikes[pi]:
                         syn = self.synapses.get((pre.id, post.id))
                         if syn:
-                            total_input += syn.weight
+                            # Apply Boredom (Synaptic Depression)
+                            total_input += syn.weight * syn.depression
                             if not self.frozen:
                                 # Pre-synaptic activity leaves a trace
                                 syn.eligibility = min(syn.eligibility + 0.5, 10.0)
+                                # Spiking on the same synapse causes 'Boredom'
+                                syn.depression = max(0.1, syn.depression - 0.05)
                 
                 fired = post.receive(total_input, self.t)
                 layer_spikes[idx] = fired
@@ -144,9 +148,10 @@ class RealtimeBrain:
         
         if not self.frozen:
             self._stdp_update(spikes_per_layer)
-            # Slow eligibility trace decay (Biological half-life scale)
+            # Slow biological recovery
             for syn in self.synapses.values():
                 syn.eligibility *= 0.999
+                syn.depression = min(1.0, syn.depression + 0.005) # Boredom recovers
         
         self.dopamine *= self.dopamine_decay
         if not self.frozen and self.learning_steps % 100 == 0:
@@ -212,15 +217,15 @@ class RealtimeBrain:
 
                 # Biologically plausible homeostasis
                 if actual_rate > target_rate:
-                    neuron.threshold += 0.005  # Threshold rises if overactive
-                    neuron.gain = max(0.5, neuron.gain - 0.05) # Reduce gain if overactive
-                elif actual_rate < target_rate * 0.1:
-                    neuron.threshold -= 0.002  # Threshold drops if underactive
-                    neuron.gain = min(5.0, neuron.gain + 0.1) # Increase gain if underactive
+                    # No hard ceiling: threshold keeps rising if overactive
+                    neuron.threshold += 0.01
+                    neuron.gain = max(0.2, neuron.gain - 0.1)
+                elif actual_rate < target_rate * 0.05:
+                    neuron.threshold -= 0.005
+                    neuron.gain = min(10.0, neuron.gain + 0.2)
 
-                # Clamp thresholds
-                max_thresh = 0.5 if li == len(self.layers) - 1 else 0.2
-                neuron.threshold = np.clip(neuron.threshold, 0.01, max_thresh)
+                # Minimal clamp to prevent negative threshold
+                neuron.threshold = max(0.01, neuron.threshold)
     
     def normalize_weights(self, target_avg: float = 1.0):
         weights = [s.weight for s in self.synapses.values()]
@@ -283,8 +288,8 @@ class RealtimeBrain:
                 f"Acc A: {self.acc_A:.0%}, B: {self.acc_B:.0%}")
 
 if __name__ == "__main__":
-    # Optimization: 128 hidden neurons for better feature separation
-    my_brain = RealtimeBrain(layer_sizes=[4, 128, 2])
+    # Optimization: 2,000 neurons for Termux performance
+    my_brain = RealtimeBrain(layer_sizes=[4, 2000, 2])
     pattern_A = np.array([1.0, 0.0, 1.0, 0.0])
     pattern_B = np.array([0.0, 1.0, 0.0, 1.0])
 
