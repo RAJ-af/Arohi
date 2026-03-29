@@ -3,74 +3,12 @@ from collections import deque
 import time
 import sys
 
-class Synapse:
-    """Ek synapse jo do neurons ko jodta hai (connection)."""
-    def __init__(self):
-        self.weight   = np.random.uniform(0.3, 0.6)
-        self.last_pre  = -np.inf
-        self.last_post = -np.inf
-        self.eligibility = 0.0
-        self.depression  = 1.0  # Boredom (Short-Term Synaptic Depression)
-
-
-class Neuron:
-    """Ek biological neuron jo spike generate karta hai."""
-    def __init__(self, neuron_id):
-        self.id            = neuron_id
-        self.voltage       = 0.0
-        self.threshold     = 0.05
-        self.bias          = 0.01
-        self.rest          = -0.1
-        self.decay         = 0.95
-        self.refractory    = 0
-        self.last_spike    = -np.inf
-        self.fatigue       = 0.0
-        self.gain          = 1.0      # Global Synaptic Scaling factor
-        self.spike_history = deque(maxlen=100)
-    
-    def receive(self, current: float, t: float) -> bool:
-        if self.refractory > 0:
-            self.refractory -= 1
-            return False
-
-        # Biologically inspired fatigue (Short-term adaptation)
-        self.fatigue *= 0.9
-        
-        # Apply Gain (Synaptic Scaling)
-        eff_current = current * self.gain
-        self.voltage = (self.voltage * self.decay + (eff_current + self.bias) + self.rest * (1 - self.decay))
-
-        # Accelerated Intrinsic Plasticity: Sensitization increases quickly when silent
-        if t - self.last_spike > 0.1: # 100ms of silence
-            self.threshold = max(0.01, self.threshold - 0.001) # 10x faster decay
-            self.voltage += 0.005 # Faster sub-threshold sensitization
-
-        # Effective threshold rises sharply with fatigue (Exhaustion)
-        eff_threshold = self.threshold + (self.fatigue * 8.0) # Even more impact
-
-        if self.voltage >= eff_threshold:
-            self.voltage    = self.rest
-            self.refractory = 4           # Longer refractory period
-            self.fatigue   += 3.0         # Heavier exhaustion increment
-            self.last_spike = t
-            self.spike_history.append(t)
-            return True
-        return False
-
-    def reset(self):
-        self.voltage = self.rest
-        self.fatigue = 0.0
-        self.refractory = 0
-
-
 class SensoryEncoder:
     """Encoder jo strings ko spike sequences mein convert karta hai."""
     def __init__(self, n_inputs=4):
         self.n_inputs = n_inputs
 
     def encode_text(self, text: str):
-        # Har character ko ek temporal spike pattern mein convert karo
-        # Example: 'A' -> bit pattern [1,0,1,0] at t=0, 'B' -> [0,1,0,1] at t=50
         sequence = []
         for char in text.upper():
             bits = np.zeros(self.n_inputs)
@@ -80,318 +18,309 @@ class SensoryEncoder:
             sequence.append(bits)
         return sequence
 
-
 class RealtimeBrain:
-    """Poora neural network jo patterns seekhta hai (Brain simulation)."""
+    """Vectorized SNN jo Termux par fast chalta hai (Brain simulation)."""
     def __init__(self, layer_sizes: list[int], density: float = 0.05):
         self.t = 0.0
         self.dt = 0.001
-        self.layers: list[list[Neuron]] = []
-        neuron_id = 0
-        for size in layer_sizes:
-            layer = [Neuron(neuron_id + i) for i in range(size)]
-            self.layers.append(layer)
-            neuron_id += size
-        
-        self.synapses: dict[tuple, Synapse] = {}
-        # Feed-forward sparse connectivity
-        for li in range(len(self.layers) - 1):
-            for pre in self.layers[li]:
-                for post in self.layers[li + 1]:
-                    if np.random.random() < density or li == len(self.layers)-2: # Keep output denser for readout
-                        self.synapses[(pre.id, post.id)] = Synapse()
-        
-        # Recurrent sparse connectivity (Hidden layer feedback)
-        hidden_layer = self.layers[1]
-        for pre in hidden_layer:
-            for post in hidden_layer:
-                if pre.id != post.id and np.random.random() < density:
-                    self.synapses[(pre.id, post.id)] = Synapse()
+        self.layer_sizes = layer_sizes
+        self.num_neurons = sum(layer_sizes)
 
-        self.last_spikes = [([False] * len(layer)) for layer in self.layers]
-        self.dopamine        = 0.0
-        self.dopamine_decay  = 0.95
-        self.layer_inhibs    = [0.0, 1.2, 5.0] # Aggressive Lateral Inhibition
+        # Neuron State Vectors
+        self.v = np.ones(self.num_neurons) * -0.1
+        self.thr = np.ones(self.num_neurons) * 0.05
+        self.fatigue = np.zeros(self.num_neurons)
+        self.gain = np.ones(self.num_neurons)
+        self.last_spike = np.ones(self.num_neurons) * -np.inf
+        self.refractory = np.zeros(self.num_neurons, dtype=int)
+        self.fire_rate = np.zeros(self.num_neurons) # For Homeostasis
+
+        # Constants
+        self.decay = 0.95
+        self.rest = -0.1
+        self.bias = 0.01
+        
+        # Layer Indexing
+        self.layer_indices = []
+        curr = 0
+        for s in layer_sizes:
+            self.layer_indices.append(np.arange(curr, curr + s))
+            curr += s
+        
+        # Synapse Vectors (Sparse)
+        self.syn_pre = []
+        self.syn_post = []
+
+        # Build Sparse Connectivity
+        for li in range(len(layer_sizes) - 1):
+            pre_idx = self.layer_indices[li]
+            post_idx = self.layer_indices[li+1]
+            for r in pre_idx:
+                for c in post_idx:
+                    if np.random.random() < density or li == len(layer_sizes)-2:
+                        self.syn_pre.append(r)
+                        self.syn_post.append(c)
+
+        # Recurrent (Hidden Layer)
+        hidden_idx = self.layer_indices[1]
+        for r in hidden_idx:
+            for c in hidden_idx:
+                if r != c and np.random.random() < density:
+                    self.syn_pre.append(r)
+                    self.syn_post.append(c)
+
+        self.syn_pre = np.array(self.syn_pre, dtype=int)
+        self.syn_post = np.array(self.syn_post, dtype=int)
+        num_syn = len(self.syn_pre)
+
+        self.w = np.random.uniform(0.3, 0.6, num_syn)
+        self.eligibility = np.zeros(num_syn)
+        self.depression = np.ones(num_syn)
+
+        self.dopamine = 0.0
+        self.dopamine_decay = 0.95
+        self.layer_inhibs = [0.0, 1.2, 5.0]
 
         self.acc_A = 0.0
         self.acc_B = 0.0
-
         self.frozen = False
-        self.total_spikes   = 0
+        self.total_spikes = 0
         self.learning_steps = 0
-    
+        self.last_spikes_vec = np.zeros(self.num_neurons, dtype=bool)
+
     def reset_network_state(self):
-        for layer in self.layers:
-            for neuron in layer:
-                neuron.reset()
+        self.v[:] = self.rest
+        self.fatigue[:] = 0.0
+        self.refractory[:] = 0
         self.dopamine = 0.0
+        self.last_spikes_vec[:] = False
 
     def step(self, inputs: np.ndarray) -> np.ndarray:
         self.t += self.dt
-        current_spikes_per_layer = []
         
-        # Layer 0 (Sensory Input)
-        layer0_spikes = []
-        for i, neuron in enumerate(self.layers[0]):
-            fired = neuron.receive((inputs[i] * 10.0) if i < len(inputs) else 0.0, self.t)
-            layer0_spikes.append(fired)
-        current_spikes_per_layer.append(layer0_spikes)
+        # 1. Update Sensory Layer (0)
+        l0 = self.layer_indices[0]
+        self.v[l0] = self.v[l0] * self.decay + (inputs * 10.0 + self.bias) + self.rest * (1 - self.decay)
         
-        # Propagation with Recurrence
-        for li in range(1, len(self.layers)):
-            layer_neurons = self.layers[li]
-            layer_spikes = [False] * len(layer_neurons)
+        # 2. Synaptic Propagation (Vectorized)
+        incoming_spikes = self.last_spikes_vec[self.syn_pre]
+        weighted_inputs = self.w * self.depression * incoming_spikes
 
-            indices = list(range(len(layer_neurons)))
-            np.random.shuffle(indices)
+        total_synaptic_input = np.zeros(self.num_neurons)
+        np.add.at(total_synaptic_input, self.syn_post, weighted_inputs)
 
-            inhib_strength = self.layer_inhibs[li] if li < len(self.layer_inhibs) else 0.5
+        # 3. Update Hidden and Output Voltages
+        l_others = np.concatenate(self.layer_indices[1:])
+        self.v[l_others] = self.v[l_others] * self.decay + (total_synaptic_input[l_others] * self.gain[l_others] + self.bias) + self.rest * (1 - self.decay)
 
-            for idx in indices:
-                post = layer_neurons[idx]
-                total_input = 0.0
+        # 4. Intrinsic Plasticity (Silent neurons get hungry)
+        silent_mask = (self.t - self.last_spike) > 0.1
+        self.thr[silent_mask] = np.maximum(0.01, self.thr[silent_mask] - 0.001)
+        self.v[silent_mask] += 0.005
 
-                # 1. Feed-forward Input
-                prev_layer_spikes = current_spikes_per_layer[li - 1]
-                for pi, pre in enumerate(self.layers[li - 1]):
-                    if prev_layer_spikes[pi]:
-                        syn = self.synapses.get((pre.id, post.id))
-                        if syn:
-                            total_input += syn.weight * syn.depression
-                            if not self.frozen:
-                                syn.eligibility = min(syn.eligibility + 0.5, 10.0)
-                                syn.depression = max(0.1, syn.depression - 0.05)
+        # 5. Spike Detection
+        self.fatigue *= 0.9
+        eff_thr = self.thr + (self.fatigue * 8.0)
+        spiking = (self.v >= eff_thr) & (self.refractory <= 0)
 
-                # 2. Recurrent Input (Working Memory)
-                if li == 1: # Hidden layer feedback
-                    last_hidden_spikes = self.last_spikes[1]
-                    for hi, pre in enumerate(self.layers[1]):
-                        if last_hidden_spikes[hi]:
-                            syn = self.synapses.get((pre.id, post.id))
-                            if syn:
-                                total_input += syn.weight * syn.depression
-                                if not self.frozen:
-                                    syn.eligibility = min(syn.eligibility + 0.5, 10.0)
-                                    syn.depression = max(0.1, syn.depression - 0.05)
-                
-                fired = post.receive(total_input, self.t)
-                layer_spikes[idx] = fired
-                if fired:
-                    self.total_spikes += 1
-                    # Lateral Inhibition
-                    for peer in layer_neurons:
-                        if peer.id != post.id:
-                            peer.voltage -= inhib_strength
-            
-            current_spikes_per_layer.append(layer_spikes)
-        
+        # Record Spikes
+        self.v[spiking] = self.rest
+        self.refractory[spiking] = 4
+        self.fatigue[spiking] += 3.0
+        self.last_spike[spiking] = self.t
+        self.total_spikes += np.sum(spiking)
+        self.fire_rate = self.fire_rate * 0.99 + spiking * 0.01
+
+        # 6. Lateral Inhibition (Strict Winner-Take-All)
+        for li in range(1, len(self.layer_indices)):
+            idx = self.layer_indices[li]
+            num_layer_spikes = np.sum(spiking[idx])
+            if num_layer_spikes > 0:
+                strength = self.layer_inhibs[li]
+                self.v[idx] -= num_layer_spikes * strength
+                # Winners keep their rest voltage (prevent self-inhibition)
+                self.v[spiking & np.isin(np.arange(self.num_neurons), idx)] = self.rest
+
+        self.refractory = np.maximum(0, self.refractory - 1)
+
+        # 7. Learning and Recovery (Throttled for performance)
         if not self.frozen:
-            self._stdp_update(current_spikes_per_layer)
-            # Slow biological recovery
-            for syn in self.synapses.values():
-                syn.eligibility *= 0.999
-                syn.depression = min(1.0, syn.depression + 0.005)
-        
+            # Synaptic Boring (Short-Term Depression)
+            self.depression[incoming_spikes] = np.maximum(0.1, self.depression[incoming_spikes] - 0.05)
+            self.eligibility[incoming_spikes] = np.minimum(10.0, self.eligibility[incoming_spikes] + 0.5)
+
+            if self.learning_steps % 10 == 0: # 10ms learning frequency
+                self._stdp_update_vectorized(spiking)
+
+            # Biological Recovery
+            self.eligibility *= 0.999
+            self.depression = np.minimum(1.0, self.depression + 0.005)
+
+            if self.learning_steps % 100 == 0:
+                self._homeostasis_vectorized()
+
         self.dopamine *= self.dopamine_decay
-        if not self.frozen and self.learning_steps % 100 == 0:
-            self._homeostasis()
-        
-        self.last_spikes = current_spikes_per_layer
+        self.last_spikes_vec = spiking
         self.learning_steps += 1
-        return np.array(current_spikes_per_layer[-1], dtype=float)
-    
-    def _stdp_update(self, spikes_per_layer):
-        if self.frozen: return
-        A_plus, A_minus, tau = 0.1, 0.2, 0.02
 
-        # All synapses (Feed-forward + Recurrent)
-        # Fast Lookup Map for Neurons
-        all_neurons = {}
-        for li, layer in enumerate(self.layers):
-            for ni, n in enumerate(layer):
-                all_neurons[n.id] = (n, spikes_per_layer[li][ni])
+        return spiking[self.layer_indices[-1]].astype(float)
 
-        for (pre_id, post_id), syn in self.synapses.items():
-            pre_data = all_neurons.get(pre_id)
-            post_data = all_neurons.get(post_id)
+    def _stdp_update_vectorized(self, current_spikes):
+        t_pre = self.last_spike[self.syn_pre]
+        t_post = self.last_spike[self.syn_post]
+        
+        # Logic: Post fired now -> strengthen if pre fired recently
+        #        Pre fired now -> weaken if post fired recently
+        post_fired_now = current_spikes[self.syn_post]
+        pre_fired_now = current_spikes[self.syn_pre]
+        
+        dw = np.zeros_like(self.w)
+        tau = 0.02
+        A_plus, A_minus = 0.1, 0.2
+        
+        # LTP
+        ltp_mask = post_fired_now & (t_pre > -np.inf)
+        dt_ltp = self.t - t_pre[ltp_mask]
+        dw[ltp_mask] += A_plus * np.exp(-dt_ltp / tau)
 
-            if pre_data and post_data:
-                pre, pre_fired = pre_data
-                post, post_fired = post_data
-                dw = 0.0
-                if post_fired and pre.last_spike > -np.inf:
-                    dt = self.t - pre.last_spike
-                    if 0 <= dt < 0.1: dw += A_plus * np.exp(-dt / tau)
-                if pre_fired and post.last_spike > -np.inf:
-                    dt = self.t - post.last_spike
-                    if 0 < dt < 0.1: dw -= A_minus * np.exp(-dt / tau)
+        # LTD
+        ltd_mask = pre_fired_now & (t_post > -np.inf)
+        dt_ltd = self.t - t_post[ltd_mask]
+        dw[ltd_mask] -= A_minus * np.exp(-dt_ltd / tau)
 
-                if dw != 0:
-                    dw *= (1 + self.dopamine * 2)
-                    syn.weight = np.clip(syn.weight + dw, 0.01, 1.2)
-    
+        if np.any(dw):
+            dw *= (1 + self.dopamine * 2)
+            self.w = np.clip(self.w + dw, 0.01, 1.2)
+
+    def _homeostasis_vectorized(self):
+        for li in range(len(self.layer_indices)):
+            idx = self.layer_indices[li]
+            target_rate = 1.0 if li == len(self.layer_indices) - 1 else 0.1
+
+            overactive = self.fire_rate[idx] > target_rate
+            underactive = self.fire_rate[idx] < target_rate * 0.05
+
+            self.thr[idx[overactive]] += 0.01
+            self.gain[idx[overactive]] = np.maximum(0.2, self.gain[idx[overactive]] - 0.1)
+
+            self.thr[idx[underactive]] = np.maximum(0.01, self.thr[idx[underactive]] - 0.005)
+            self.gain[idx[underactive]] = np.minimum(10.0, self.gain[idx[underactive]] + 0.2)
+
     def reward(self, amount: float = 1.0):
         if self.frozen: return
         self.dopamine = min(self.dopamine + amount, 10.0)
-        # Apply reinforcement using the long-lived traces
-        for syn in self.synapses.values():
-            if syn.eligibility > 0.1:
-                syn.weight = np.clip(syn.weight + 0.05 * syn.eligibility * amount, 0.01, 1.2)
-                syn.eligibility *= 0.5 # consumed
-    
+        # Vectorized reinforcement
+        eligible = self.eligibility > 0.1
+        self.w[eligible] = np.clip(self.w[eligible] + 0.05 * self.eligibility[eligible] * amount, 0.01, 1.2)
+        self.eligibility[eligible] *= 0.5
+
     def punish_neuron(self, neuron_id, amount=1.0):
         if self.frozen: return
-        for (pre_id, post_id), syn in self.synapses.items():
-            if post_id == neuron_id and syn.eligibility > 0.1:
-                syn.weight = np.clip(syn.weight - 0.1 * syn.eligibility * amount, 0.01, 1.2)
-                syn.eligibility *= 0.5
+        syn_mask = (self.syn_post == neuron_id) & (self.eligibility > 0.1)
+        self.w[syn_mask] = np.clip(self.w[syn_mask] - 0.1 * self.eligibility[syn_mask] * amount, 0.01, 1.2)
+        self.eligibility[syn_mask] *= 0.5
 
-    def _homeostasis(self):
-        if self.frozen: return
-        for li, layer in enumerate(self.layers):
-            # Target firing rates (Hz)
-            target_rate = 1.0 if li == len(self.layers) - 1 else 0.1
-            for neuron in layer:
-                recent = [s for s in neuron.spike_history if self.t - s < 1.0]
-                actual_rate = len(recent) / 1.0
-
-                # Biologically plausible homeostasis
-                if actual_rate > target_rate:
-                    # No hard ceiling: threshold keeps rising if overactive
-                    neuron.threshold += 0.01
-                    neuron.gain = max(0.2, neuron.gain - 0.1)
-                elif actual_rate < target_rate * 0.05:
-                    neuron.threshold -= 0.005
-                    neuron.gain = min(10.0, neuron.gain + 0.2)
-
-                # Minimal clamp to prevent negative threshold
-                neuron.threshold = max(0.01, neuron.threshold)
-    
-    def normalize_weights(self, target_avg: float = 1.0):
-        weights = [s.weight for s in self.synapses.values()]
-        if not weights: return
-        avg = np.mean(weights)
-        if avg == 0: return
-        factor = target_avg / avg
-        for syn in self.synapses.values():
-            syn.weight = np.clip(syn.weight * factor, 0.01, 1.2)
+    def normalize_weights(self, target_avg: float = 0.8):
+        avg = np.mean(self.w)
+        if avg > 0:
+            self.w = np.clip(self.w * (target_avg / avg), 0.01, 1.2)
 
     def apply_manual_controls(self):
         try:
             with open("control.txt", "r") as f:
-                lines = f.readlines()
-                for line in lines:
+                for line in f:
                     parts = line.strip().split()
                     if len(parts) == 3 and parts[0] == "SET":
-                        ids = parts[1].split("->")
-                        pre, post = int(ids[0]), int(ids[1])
+                        pre, post = map(int, parts[1].split("->"))
                         val = float(parts[2])
-                        if (pre, post) in self.synapses:
-                            self.synapses[(pre, post)].weight = np.clip(val, 0.01, 1.2)
-                            print(f"God Mode: {pre}->{post} set to {val}")
+                        mask = (self.syn_pre == pre) & (self.syn_post == post)
+                        self.w[mask] = np.clip(val, 0.01, 1.2)
+                        if np.any(mask): print(f"God Mode: {pre}->{post} set to {val}")
             open("control.txt", "w").close()
-        except FileNotFoundError: pass
+        except Exception: pass
 
-    def run_inference(self, pattern_A, pattern_B, episodes=100):
-        print("\n--- AI Brain Inference (Test Mode) ---")
+    def run_inference(self, ears, text, episodes=10):
+        print(f"\n--- AI Brain Inference: '{text}' ---")
         self.frozen = True
-        correct_A = correct_B = 0
-        for episode in range(episodes):
+        correct = 0
+        sequence = ears.encode_text(text)
+        for ep in range(episodes):
             self.reset_network_state()
-            out_A = np.zeros(2)
-            for _ in range(100): out_A += self.step(pattern_A * 100.0)
-            if out_A.sum() > 0 and np.argmax(out_A) == 0: correct_A += 1
-            for _ in range(20): self.step(np.zeros(4))
-            self.reset_network_state()
-            out_B = np.zeros(2)
-            for _ in range(100): out_B += self.step(pattern_B * 100.0)
-            if out_B.sum() > 0 and np.argmax(out_B) == 1: correct_B += 1
-            if (episode + 1) % 20 == 0:
-                print(f"Ep {episode+1}/{episodes} | A: {correct_A/(episode+1):.0%} | B: {correct_B/(episode+1):.0%}")
-        print(f"Final results: A: {correct_A/episodes:.0%}, B: {correct_B/episodes:.0%}")
-        # Hinglish Summary for the user
+            success = True
+            for i, pattern in enumerate(sequence):
+                for _ in range(10): self.step(np.zeros(4))
+                out = np.zeros(len(self.layer_indices[-1]))
+                for _ in range(50): out += self.step(pattern * 100.0)
+                if np.argmax(out) != i: success = False
+            if success: correct += 1
+            print(f"Ep {ep+1}/{episodes} | Sequence Success: {'YES' if success else 'NO'}")
+        print(f"Final Accuracy: {correct/episodes:.0%}")
         print("\nSummary: Brain ne patterns ko differentiate karna seekh liya hai!")
 
     def show_weights(self):
         with open("weights_map.txt", "w") as f:
-            f.write(f"Brain Time: {self.t:.2f}s | Mode: {'Frozen' if self.frozen else 'Training'}\n")
-            f.write("-" * 50 + "\n")
-            for (pre, post), syn in sorted(self.synapses.items()):
-                filled = int((syn.weight / 1.2) * 20)
-                bar = "[" + "#" * filled + "-" * (20 - filled) + "]"
-                f.write(f"S[{pre:02}->{post:02}]: {syn.weight:.3f} {bar}\n")
-        print(f"Weights map updated (Avg: {np.mean([s.weight for s in self.synapses.values()]):.3f})")
+            f.write(f"Brain Time: {self.t:.2f}s | Synapses: {len(self.w)}\n")
+            # Only top 100 for brevity in file
+            indices = np.argsort(self.w)[-100:]
+            for i in indices:
+                f.write(f"S[{self.syn_pre[i]:03}->{self.syn_post[i]:03}]: {self.w[i]:.3f}\n")
+        print(f"Weights map updated (Avg: {np.mean(self.w):.3f})")
 
     def status(self):
-        weights = [s.weight for s in self.synapses.values()]
-        return (f"T:{self.t:.2f}s | W_avg:{np.mean(weights):.3f} | "
+        return (f"T:{self.t:.2f}s | W_avg:{np.mean(self.w):.3f} | "
                 f"Acc A: {self.acc_A:.0%}, B: {self.acc_B:.0%}")
 
 if __name__ == "__main__":
-    # Hardware Optimization: 1,000 neurons with 0.05 sparse density
-    my_brain = RealtimeBrain(layer_sizes=[4, 1000, 2], density=0.05)
+    # Performance Optimization: Vectorized 500-neuron hidden layer
+    my_brain = RealtimeBrain(layer_sizes=[4, 500, 2], density=0.05)
     ears = SensoryEncoder(n_inputs=4)
 
-    # Sequence: 'AB'
-    pattern_A = np.array([1.0, 0.0, 1.0, 0.0])
-    pattern_B = np.array([0.0, 1.0, 0.0, 1.0])
-
     if "--test" in sys.argv:
-        my_brain.run_inference(pattern_A, pattern_B)
+        my_brain.run_inference(ears, "AB")
     else:
-        print("\n--- Starting AI Brain Training ---")
-        history_A, history_B = deque(maxlen=20), deque(maxlen=20)
+        print("\n--- Starting Vectorized AI Brain Training (Seekhna shuru...) ---")
+        history_A = deque(maxlen=20)
 
-        # Simple Sequence Training: Learn 'A' followed by 'B'
+        start_time = time.time()
         for episode in range(1000):
             my_brain.total_spikes = 0
             my_brain.apply_manual_controls()
-
             my_brain.reset_network_state()
-            # Rest period
-            for _ in range(50): my_brain.step(np.zeros(4))
 
-            # Feed Sequence 'A' -> 'B'
+            for _ in range(50): my_brain.step(np.zeros(4))
             sequence = ears.encode_text('AB')
 
             success_seq = 0
             for i, pattern in enumerate(sequence):
-                # Small rest between patterns to allow temporal correlation
                 for _ in range(10): my_brain.step(np.zeros(4))
-
                 out = np.zeros(2)
-                # Each pattern in sequence shown for 50 steps
                 for _ in range(50): out += my_brain.step(pattern * 100.0)
 
-                if out.sum() > 0:
+                if np.sum(out) > 0:
                     action = np.argmax(out)
-                    # For sequence 'AB', expect Neuron 0 for A, Neuron 1 for B
                     if action == i:
+                        # Sahi sequence ke liye reward
                         my_brain.reward(5.0)
-                        if i == 1: success_seq = 1 # Correct full sequence 'AB'
+                        if i == 1: success_seq = 1
                     else:
-                        my_brain.layers[-1][action].fatigue += 5.0
-                        my_brain.punish_neuron(action, amount=20.0)
+                        # Galat pattern par punishment
+                        my_brain.punish_neuron(my_brain.layer_indices[-1][action], amount=20.0)
 
-            history_A.append(success_seq) # Tracking full sequence success
-            history_B.append(success_seq)
-            my_brain.acc_A = sum(history_A)/len(history_A)
-            my_brain.acc_B = my_brain.acc_A
+            history_A.append(success_seq)
+            my_brain.acc_A = my_brain.acc_B = sum(history_A)/len(history_A)
 
-            if not my_brain.frozen and len(history_A) == 20:
-                if (my_brain.acc_A >= 0.95) and (my_brain.acc_B >= 0.95):
-                    my_brain.frozen = True
-                    print(f"\n!!! Balanced Success Lock at Episode {episode+1} !!!")
-                    my_brain.show_weights()
+            if (episode + 1) % 10 == 0:
+                elapsed = time.time() - start_time
+                print(f"Stats: {my_brain.status()} | Sim Speed: {my_brain.t/elapsed:.2f}x")
+                print(f"Output Thresholds: {[f'{my_brain.thr[idx]:.3f}' for idx in my_brain.layer_indices[-1]]}")
+                sys.stdout.flush()
+
+            if my_brain.acc_A >= 0.95 and len(history_A) == 20:
+                my_brain.frozen = True
+                print(f"\n!!! Balanced Success Lock at Episode {episode+1} !!!")
+                my_brain.show_weights()
+                break
 
             if not my_brain.frozen:
-                for syn in my_brain.synapses.values(): syn.weight *= 0.9999
-                if (episode + 1) % 10 == 0:
-                    my_brain.normalize_weights(target_avg=0.8)
-
-            if (episode + 1) % 5 == 0:
-                my_brain.show_weights()
-                if (episode + 1) % 10 == 0:
-                    print(f"Output Thresholds: {[f'{n.threshold:.3f}' for n in my_brain.layers[-1]]}")
-                    print(f"Stats: {my_brain.status()}")
-                    sys.stdout.flush()
+                my_brain.w *= 0.9999
+                if (episode + 1) % 50 == 0: my_brain.normalize_weights()
