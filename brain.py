@@ -63,9 +63,27 @@ class Neuron:
         self.refractory = 0
 
 
+class SensoryEncoder:
+    """Encoder jo strings ko spike sequences mein convert karta hai."""
+    def __init__(self, n_inputs=4):
+        self.n_inputs = n_inputs
+
+    def encode_text(self, text: str):
+        # Har character ko ek temporal spike pattern mein convert karo
+        # Example: 'A' -> bit pattern [1,0,1,0] at t=0, 'B' -> [0,1,0,1] at t=50
+        sequence = []
+        for char in text.upper():
+            bits = np.zeros(self.n_inputs)
+            val = ord(char) % (2**self.n_inputs)
+            for i in range(self.n_inputs):
+                if (val >> i) & 1: bits[i] = 1.0
+            sequence.append(bits)
+        return sequence
+
+
 class RealtimeBrain:
     """Poora neural network jo patterns seekhta hai (Brain simulation)."""
-    def __init__(self, layer_sizes: list[int]):
+    def __init__(self, layer_sizes: list[int], density: float = 0.05):
         self.t = 0.0
         self.dt = 0.001
         self.layers: list[list[Neuron]] = []
@@ -76,11 +94,21 @@ class RealtimeBrain:
             neuron_id += size
         
         self.synapses: dict[tuple, Synapse] = {}
+        # Feed-forward sparse connectivity
         for li in range(len(self.layers) - 1):
             for pre in self.layers[li]:
                 for post in self.layers[li + 1]:
-                    self.synapses[(pre.id, post.id)] = Synapse()
+                    if np.random.random() < density or li == len(self.layers)-2: # Keep output denser for readout
+                        self.synapses[(pre.id, post.id)] = Synapse()
         
+        # Recurrent sparse connectivity (Hidden layer feedback)
+        hidden_layer = self.layers[1]
+        for pre in hidden_layer:
+            for post in hidden_layer:
+                if pre.id != post.id and np.random.random() < density:
+                    self.synapses[(pre.id, post.id)] = Synapse()
+
+        self.last_spikes = [([False] * len(layer)) for layer in self.layers]
         self.dopamine        = 0.0
         self.dopamine_decay  = 0.95
         self.layer_inhibs    = [0.0, 1.2, 5.0] # Aggressive Lateral Inhibition
@@ -100,18 +128,17 @@ class RealtimeBrain:
 
     def step(self, inputs: np.ndarray) -> np.ndarray:
         self.t += self.dt
-        spikes_per_layer = []
+        current_spikes_per_layer = []
         
-        # Layer 0
-        current_spikes = []
+        # Layer 0 (Sensory Input)
+        layer0_spikes = []
         for i, neuron in enumerate(self.layers[0]):
-            fired = neuron.receive((inputs[i] * 3.0) if i < len(inputs) else 0.0, self.t)
-            current_spikes.append(fired)
-        spikes_per_layer.append(current_spikes)
+            fired = neuron.receive((inputs[i] * 10.0) if i < len(inputs) else 0.0, self.t)
+            layer0_spikes.append(fired)
+        current_spikes_per_layer.append(layer0_spikes)
         
-        # Propagation
+        # Propagation with Recurrence
         for li in range(1, len(self.layers)):
-            prev_spikes  = spikes_per_layer[li - 1]
             layer_neurons = self.layers[li]
             layer_spikes = [False] * len(layer_neurons)
 
@@ -123,17 +150,29 @@ class RealtimeBrain:
             for idx in indices:
                 post = layer_neurons[idx]
                 total_input = 0.0
+
+                # 1. Feed-forward Input
+                prev_layer_spikes = current_spikes_per_layer[li - 1]
                 for pi, pre in enumerate(self.layers[li - 1]):
-                    if prev_spikes[pi]:
+                    if prev_layer_spikes[pi]:
                         syn = self.synapses.get((pre.id, post.id))
                         if syn:
-                            # Apply Boredom (Synaptic Depression)
                             total_input += syn.weight * syn.depression
                             if not self.frozen:
-                                # Pre-synaptic activity leaves a trace
                                 syn.eligibility = min(syn.eligibility + 0.5, 10.0)
-                                # Spiking on the same synapse causes 'Boredom'
                                 syn.depression = max(0.1, syn.depression - 0.05)
+
+                # 2. Recurrent Input (Working Memory)
+                if li == 1: # Hidden layer feedback
+                    last_hidden_spikes = self.last_spikes[1]
+                    for hi, pre in enumerate(self.layers[1]):
+                        if last_hidden_spikes[hi]:
+                            syn = self.synapses.get((pre.id, post.id))
+                            if syn:
+                                total_input += syn.weight * syn.depression
+                                if not self.frozen:
+                                    syn.eligibility = min(syn.eligibility + 0.5, 10.0)
+                                    syn.depression = max(0.1, syn.depression - 0.05)
                 
                 fired = post.receive(total_input, self.t)
                 layer_spikes[idx] = fired
@@ -144,51 +183,52 @@ class RealtimeBrain:
                         if peer.id != post.id:
                             peer.voltage -= inhib_strength
             
-            spikes_per_layer.append(layer_spikes)
+            current_spikes_per_layer.append(layer_spikes)
         
         if not self.frozen:
-            self._stdp_update(spikes_per_layer)
+            self._stdp_update(current_spikes_per_layer)
             # Slow biological recovery
             for syn in self.synapses.values():
                 syn.eligibility *= 0.999
-                syn.depression = min(1.0, syn.depression + 0.005) # Boredom recovers
+                syn.depression = min(1.0, syn.depression + 0.005)
         
         self.dopamine *= self.dopamine_decay
         if not self.frozen and self.learning_steps % 100 == 0:
             self._homeostasis()
         
+        self.last_spikes = current_spikes_per_layer
         self.learning_steps += 1
-        return np.array(spikes_per_layer[-1], dtype=float)
+        return np.array(current_spikes_per_layer[-1], dtype=float)
     
     def _stdp_update(self, spikes_per_layer):
         if self.frozen: return
-        # Robust STDP to allow autonomous learning to catch up
         A_plus, A_minus, tau = 0.1, 0.2, 0.02
-        for li in range(len(self.layers) - 1):
-            for pi, pre in enumerate(self.layers[li]):
-                for post_idx, post in enumerate(self.layers[li + 1]):
-                    syn = self.synapses.get((pre.id, post.id))
-                    if not syn: continue
-                    pre_fired, post_fired = spikes_per_layer[li][pi], spikes_per_layer[li + 1][post_idx]
-                    dw = 0.0
-                    if post_fired and pre.last_spike > -np.inf:
-                        dt = self.t - pre.last_spike
-                        if 0 <= dt < 0.1: dw += A_plus * np.exp(-dt / tau)
-                    if pre_fired and post.last_spike > -np.inf:
-                        dt = self.t - post.last_spike
-                        if 0 < dt < 0.1: dw -= A_minus * np.exp(-dt / tau)
-                    if dw != 0:
-                        dw *= (1 + self.dopamine * 2)
-                        old_w = syn.weight
-                        syn.weight = np.clip(old_w + dw, 0.01, 1.2)
-                        if syn.weight > old_w:
-                            gain = syn.weight - old_w
-                            peers = [self.synapses.get((pre.id, p.id)) for p in self.layers[li+1] if p.id != post.id]
-                            peers = [s for s in peers if s]
-                            if peers:
-                                reduction = gain / len(peers)
-                                for osyn in peers:
-                                    osyn.weight = np.clip(osyn.weight - reduction, 0.01, 1.2)
+
+        # All synapses (Feed-forward + Recurrent)
+        # Fast Lookup Map for Neurons
+        all_neurons = {}
+        for li, layer in enumerate(self.layers):
+            for ni, n in enumerate(layer):
+                all_neurons[n.id] = (n, spikes_per_layer[li][ni])
+
+        for (pre_id, post_id), syn in self.synapses.items():
+            pre_data = all_neurons.get(pre_id)
+            post_data = all_neurons.get(post_id)
+
+            if pre_data and post_data:
+                pre, pre_fired = pre_data
+                post, post_fired = post_data
+                dw = 0.0
+                if post_fired and pre.last_spike > -np.inf:
+                    dt = self.t - pre.last_spike
+                    if 0 <= dt < 0.1: dw += A_plus * np.exp(-dt / tau)
+                if pre_fired and post.last_spike > -np.inf:
+                    dt = self.t - post.last_spike
+                    if 0 < dt < 0.1: dw -= A_minus * np.exp(-dt / tau)
+
+                if dw != 0:
+                    dw *= (1 + self.dopamine * 2)
+                    syn.weight = np.clip(syn.weight + dw, 0.01, 1.2)
     
     def reward(self, amount: float = 1.0):
         if self.frozen: return
@@ -288,8 +328,11 @@ class RealtimeBrain:
                 f"Acc A: {self.acc_A:.0%}, B: {self.acc_B:.0%}")
 
 if __name__ == "__main__":
-    # Optimization: 2,000 neurons for Termux performance
-    my_brain = RealtimeBrain(layer_sizes=[4, 2000, 2])
+    # Hardware Optimization: 1,000 neurons with 0.05 sparse density
+    my_brain = RealtimeBrain(layer_sizes=[4, 1000, 2], density=0.05)
+    ears = SensoryEncoder(n_inputs=4)
+
+    # Sequence: 'AB'
     pattern_A = np.array([1.0, 0.0, 1.0, 0.0])
     pattern_B = np.array([0.0, 1.0, 0.0, 1.0])
 
@@ -299,41 +342,41 @@ if __name__ == "__main__":
         print("\n--- Starting AI Brain Training ---")
         history_A, history_B = deque(maxlen=20), deque(maxlen=20)
 
+        # Simple Sequence Training: Learn 'A' followed by 'B'
         for episode in range(1000):
             my_brain.total_spikes = 0
             my_brain.apply_manual_controls()
 
-            # Simple 50/50 Curriculum
-            trial_queue = ['A', 'B']
-            np.random.shuffle(trial_queue)
+            my_brain.reset_network_state()
+            # Rest period
+            for _ in range(50): my_brain.step(np.zeros(4))
 
-            success_A_ep, success_B_ep = 0, 0
-            for t_type in trial_queue:
-                my_brain.reset_network_state()
-                for _ in range(50): my_brain.step(np.zeros(4))
+            # Feed Sequence 'A' -> 'B'
+            sequence = ears.encode_text('AB')
 
-                input_pattern = pattern_A if t_type == 'A' else pattern_B
-                target_neuron = 0 if t_type == 'A' else 1
+            success_seq = 0
+            for i, pattern in enumerate(sequence):
+                # Small rest between patterns to allow temporal correlation
+                for _ in range(10): my_brain.step(np.zeros(4))
 
                 out = np.zeros(2)
-                # Equal power for all patterns
-                for _ in range(100): out += my_brain.step(input_pattern * 100.0)
+                # Each pattern in sequence shown for 50 steps
+                for _ in range(50): out += my_brain.step(pattern * 100.0)
 
                 if out.sum() > 0:
                     action = np.argmax(out)
-                    if action == target_neuron:
-                        # Sahi action ke liye reward
+                    # For sequence 'AB', expect Neuron 0 for A, Neuron 1 for B
+                    if action == i:
                         my_brain.reward(5.0)
-                        if t_type == 'A': success_A_ep = 1
-                        else: success_B_ep = 1
+                        if i == 1: success_seq = 1 # Correct full sequence 'AB'
                     else:
-                        # Galat action ke liye punishment aur thakaan (Exhaustion)
                         my_brain.layers[-1][action].fatigue += 5.0
                         my_brain.punish_neuron(action, amount=20.0)
 
-            history_A.append(success_A_ep)
-            history_B.append(success_B_ep)
-            my_brain.acc_A, my_brain.acc_B = sum(history_A)/len(history_A), sum(history_B)/len(history_B)
+            history_A.append(success_seq) # Tracking full sequence success
+            history_B.append(success_seq)
+            my_brain.acc_A = sum(history_A)/len(history_A)
+            my_brain.acc_B = my_brain.acc_A
 
             if not my_brain.frozen and len(history_A) == 20:
                 if (my_brain.acc_A >= 0.95) and (my_brain.acc_B >= 0.95):
