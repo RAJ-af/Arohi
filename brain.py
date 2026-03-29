@@ -2,6 +2,39 @@ import numpy as np
 from collections import deque
 import time
 import sys
+import sqlite3
+
+class SQLiteMemory:
+    """SQLite database interface for permanent SNN memory."""
+    def __init__(self, db_path="brain_memory.db"):
+        self.conn = sqlite3.connect(db_path)
+        self.cursor = self.conn.cursor()
+        self._init_db()
+
+    def _init_db(self):
+        self.cursor.execute('''CREATE TABLE IF NOT EXISTS synapses
+                             (pre_id INTEGER, post_id INTEGER, weight REAL, PRIMARY KEY(pre_id, post_id))''')
+        self.cursor.execute('''CREATE TABLE IF NOT EXISTS sequence_graph
+                             (pattern_from TEXT, pattern_to TEXT, edge_weight REAL, PRIMARY KEY(pattern_from, pattern_to))''')
+        self.conn.commit()
+
+    def save_synapse(self, pre_id, post_id, weight):
+        self.cursor.execute("INSERT OR REPLACE INTO synapses VALUES (?, ?, ?)", (pre_id, post_id, weight))
+
+    def save_sequence(self, p_from, p_to, weight_inc=1.0):
+        self.cursor.execute("SELECT edge_weight FROM sequence_graph WHERE pattern_from=? AND pattern_to=?", (p_from, p_to))
+        row = self.cursor.fetchone()
+        new_weight = (row[0] + weight_inc) if row else weight_inc
+        self.cursor.execute("INSERT OR REPLACE INTO sequence_graph VALUES (?, ?, ?)", (p_from, p_to, new_weight))
+        self.conn.commit()
+
+    def get_prediction(self, p_from):
+        self.cursor.execute("SELECT pattern_to, edge_weight FROM sequence_graph WHERE pattern_from=? ORDER BY edge_weight DESC LIMIT 1", (p_from,))
+        return self.cursor.fetchone()
+
+    def close(self):
+        self.conn.close()
+
 
 class SensoryEncoder:
     """Encoder jo strings ko spike sequences mein convert karta hai."""
@@ -20,8 +53,9 @@ class SensoryEncoder:
 
 class RealtimeBrain:
     """Vectorized SNN jo Termux par fast chalta hai (Brain simulation)."""
-    def __init__(self, layer_sizes: list[int], density: float = 0.05):
+    def __init__(self, layer_sizes: list[int], density: float = 0.05, memory=None):
         self.t = 0.0
+        self.memory = memory
         self.dt = 0.001
         self.layer_sizes = layer_sizes
         self.num_neurons = sum(layer_sizes)
@@ -39,14 +73,14 @@ class RealtimeBrain:
         self.decay = 0.95
         self.rest = -0.1
         self.bias = 0.01
-        
+
         # Layer Indexing
         self.layer_indices = []
         curr = 0
         for s in layer_sizes:
             self.layer_indices.append(np.arange(curr, curr + s))
             curr += s
-        
+
         # Synapse Vectors (Sparse)
         self.syn_pre = []
         self.syn_post = []
@@ -76,6 +110,9 @@ class RealtimeBrain:
         self.w = np.random.uniform(0.3, 0.6, num_syn)
         self.eligibility = np.zeros(num_syn)
         self.depression = np.ones(num_syn)
+
+        # Load from SQLite if available
+        if self.memory: self.load_memory()
 
         self.dopamine = 0.0
         self.dopamine_decay = 0.95
@@ -149,7 +186,7 @@ class RealtimeBrain:
             self.depression[incoming_spikes] = np.maximum(0.1, self.depression[incoming_spikes] - 0.05)
             self.eligibility[incoming_spikes] = np.minimum(10.0, self.eligibility[incoming_spikes] + 0.5)
 
-            if self.learning_steps % 10 == 0: # 10ms learning frequency
+            if self.learning_steps % 5 == 0: # 5ms learning frequency
                 self._stdp_update_vectorized(spiking)
 
             # Biological Recovery
@@ -225,6 +262,30 @@ class RealtimeBrain:
         if avg > 0:
             self.w = np.clip(self.w * (target_avg / avg), 0.01, 1.2)
 
+    def save_memory(self):
+        """Save high-weight synapses to SQLite."""
+        if not self.memory: return
+        # Only save significantly strong synapses to keep DB small
+        mask = self.w > 0.4
+        for i in np.where(mask)[0]:
+            self.memory.save_synapse(int(self.syn_pre[i]), int(self.syn_post[i]), float(self.w[i]))
+        self.memory.conn.commit()
+        print(f"Memory Saved: {np.sum(mask)} strong synapses stored in DB.")
+
+    def load_memory(self):
+        """Load synaptic weights from SQLite."""
+        if not self.memory: return
+        self.memory.cursor.execute("SELECT pre_id, post_id, weight FROM synapses")
+        rows = self.memory.cursor.fetchall()
+        count = 0
+        for pre_id, post_id, weight in rows:
+            mask = (self.syn_pre == pre_id) & (self.syn_post == post_id)
+            if np.any(mask):
+                self.w[mask] = weight
+                count += 1
+        if count > 0:
+            print(f"Memory Loaded: {count} synapse weights recovered from DB.")
+
     def apply_manual_controls(self):
         try:
             with open("control.txt", "r") as f:
@@ -271,8 +332,11 @@ class RealtimeBrain:
                 f"Acc A: {self.acc_A:.0%}, B: {self.acc_B:.0%}")
 
 if __name__ == "__main__":
+    # Initialize SQLite Memory
+    brain_memory = SQLiteMemory()
+
     # Performance Optimization: Vectorized 500-neuron hidden layer
-    my_brain = RealtimeBrain(layer_sizes=[4, 500, 2], density=0.05)
+    my_brain = RealtimeBrain(layer_sizes=[4, 500, 2], density=0.05, memory=brain_memory)
     ears = SensoryEncoder(n_inputs=4)
 
     if "--test" in sys.argv:
@@ -288,10 +352,13 @@ if __name__ == "__main__":
             my_brain.reset_network_state()
 
             for _ in range(50): my_brain.step(np.zeros(4))
-            sequence = ears.encode_text('AB')
+            sequence_chars = 'AB'
+            sequence = ears.encode_text(sequence_chars)
 
             success_seq = 0
+            last_char = None
             for i, pattern in enumerate(sequence):
+                current_char = sequence_chars[i]
                 for _ in range(10): my_brain.step(np.zeros(4))
                 out = np.zeros(2)
                 for _ in range(50): out += my_brain.step(pattern * 100.0)
@@ -299,12 +366,18 @@ if __name__ == "__main__":
                 if np.sum(out) > 0:
                     action = np.argmax(out)
                     if action == i:
-                        # Sahi sequence ke liye reward
                         my_brain.reward(5.0)
-                        if i == 1: success_seq = 1
+                        if i == 1:
+                            success_seq = 1
+                            # Update SQLite Graph
+                            if last_char and my_brain.memory:
+                                my_brain.memory.save_sequence(last_char, current_char)
+                                pred = my_brain.memory.get_prediction(last_char)
+                                if pred:
+                                    print(f"Recall: Maine ye sequence pehle dekha hai, {pred[0]} usually follows {last_char}.")
                     else:
-                        # Galat pattern par punishment
                         my_brain.punish_neuron(my_brain.layer_indices[-1][action], amount=20.0)
+                last_char = current_char
 
             history_A.append(success_seq)
             my_brain.acc_A = my_brain.acc_B = sum(history_A)/len(history_A)
@@ -319,8 +392,11 @@ if __name__ == "__main__":
                 my_brain.frozen = True
                 print(f"\n!!! Balanced Success Lock at Episode {episode+1} !!!")
                 my_brain.show_weights()
+                my_brain.save_memory() # Final save on lock
                 break
 
             if not my_brain.frozen:
                 my_brain.w *= 0.9999
-                if (episode + 1) % 50 == 0: my_brain.normalize_weights()
+                if (episode + 1) % 50 == 0:
+                    my_brain.normalize_weights()
+                    my_brain.save_memory() # Periodic save
