@@ -1,0 +1,10 @@
+
+--- Starting AI Brain Training ---
+Weights map updated (Avg: 0.477)
+Weights map updated (Avg: 0.774)
+Output Thresholds: ['0.086', '0.047']
+Stats: T:1.70s | W_avg:0.774 | Acc A: 30%, B: 30%
+Weights map updated (Avg: 0.831)
+Weights map updated (Avg: 0.800)
+Output Thresholds: ['0.253', '0.217']
+Stats: T:3.40s | W_avg:0.800 | Acc A: 20%, B: 20%
